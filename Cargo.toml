@@ -1,0 +1,10 @@
+[package]
+name = "haarniska"
+version = "0.0.0"
+edition = "2024"
+description = "Library-first, extensible coding agent harness. Placeholder; under development."
+license = "MIT OR Apache-2.0"
+keywords = ["agent", "llm", "harness", "ai"]
+categories = ["development-tools"]
+
+[dependencies]
