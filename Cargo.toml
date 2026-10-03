@@ -11,7 +11,7 @@ categories = ["development-tools"]
 async-stream = "0.3.6"
 async-trait = "0.1.92"
 futures-util = "0.3.34"
-genai = "0.6.5"
+genai = "=0.7.0-rc.1"
 ratatui = "0.30.2"
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }

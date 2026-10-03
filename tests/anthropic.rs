@@ -2,7 +2,9 @@
 
 use futures_util::TryStreamExt;
 use haarniska::inference::anthropic::{AnthropicInference, model};
-use haarniska::inference::{Block, Chunk, Inference, Message, Reply, Request, StopReason, Usage};
+use haarniska::inference::{
+    Block, Chunk, Inference, Message, Reply, Request, StopReason, ToolResult, Usage,
+};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -32,6 +34,38 @@ data: {"type":"message_stop"}
 
 "#;
 
+const THINKING_TOOL_REPLY: &str = r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"I need the file."}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig123"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\": \"a.rs\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":20}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#;
+
 /// A server that answers every Messages API call with `sse`.
 async fn server_replying(sse: &str) -> MockServer {
     let server = MockServer::start().await;
@@ -47,7 +81,7 @@ async fn server_replying(sse: &str) -> MockServer {
 async fn text_reply_streams_deltas_then_the_whole_reply() {
     let server = server_replying(TEXT_REPLY).await;
     let inference =
-        AnthropicInference::with_endpoint(model::CLAUDE_OPUS_5, "test-key", &server.uri());
+        AnthropicInference::with_endpoint(model::CLAUDE_OPUS_5, "test-key", &server.uri()).unwrap();
     let messages = [Message::User("Say hello".into())];
 
     let chunks: Vec<Chunk> = inference
@@ -68,11 +102,9 @@ async fn text_reply_streams_deltas_then_the_whole_reply() {
             Chunk::Done(Reply {
                 content: vec![Block::Text("Hello world".into())],
                 stop: StopReason::EndTurn,
-                // Anthropic's final count (5) is cumulative; genai 0.6.5
-                // adds the count from message_start (1) on top.
                 usage: Usage {
                     input_tokens: 10,
-                    output_tokens: 6,
+                    output_tokens: 5,
                 },
             }),
         ]
@@ -83,7 +115,7 @@ async fn text_reply_streams_deltas_then_the_whole_reply() {
 async fn last_message_is_a_cache_point() {
     let server = server_replying(TEXT_REPLY).await;
     let inference =
-        AnthropicInference::with_endpoint(model::CLAUDE_OPUS_5, "test-key", &server.uri());
+        AnthropicInference::with_endpoint(model::CLAUDE_OPUS_5, "test-key", &server.uri()).unwrap();
     let messages = [
         Message::User("Say hello".into()),
         Message::Assistant(vec![Block::Text("Hello".into())]),
@@ -112,5 +144,52 @@ async fn last_message_is_a_cache_point() {
     assert_eq!(
         body["messages"][2]["content"][0]["cache_control"],
         serde_json::json!({"type": "ephemeral"})
+    );
+}
+
+#[tokio::test]
+async fn thinking_is_sent_back_unchanged_with_the_tool_results() {
+    let server = server_replying(THINKING_TOOL_REPLY).await;
+    let inference =
+        AnthropicInference::with_endpoint(model::CLAUDE_OPUS_5, "test-key", &server.uri()).unwrap();
+    let mut messages = vec![Message::User("Fix a.rs".into())];
+
+    let chunks: Vec<Chunk> = inference
+        .infer(Request {
+            system: "",
+            messages: &messages,
+            tools: &[],
+        })
+        .try_collect()
+        .await
+        .unwrap();
+    let Some(Chunk::Done(reply)) = chunks.last() else {
+        panic!("the stream ends with the reply");
+    };
+    assert_eq!(reply.stop, StopReason::ToolUse);
+    messages.push(Message::Assistant(reply.content.clone()));
+    messages.push(Message::ToolResults(vec![ToolResult {
+        call_id: "toolu_1".into(),
+        output: "fn main() {}".into(),
+        is_error: false,
+    }]));
+    let _: Vec<Chunk> = inference
+        .infer(Request {
+            system: "",
+            messages: &messages,
+            tools: &[],
+        })
+        .try_collect()
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = requests[1].body_json().unwrap();
+    assert_eq!(
+        body["messages"][1]["content"],
+        serde_json::json!([
+            {"type": "thinking", "thinking": "I need the file.", "signature": "sig123"},
+            {"type": "tool_use", "id": "toolu_1", "name": "read", "input": {"path": "a.rs"}},
+        ])
     );
 }

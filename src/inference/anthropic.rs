@@ -7,7 +7,7 @@ use genai::chat::{
 };
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{Client, ServiceTarget};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::inference::{
     Block, Chunk, Error, Inference, Message, Reply, Request, StopReason, ToolCall, Usage,
@@ -24,6 +24,9 @@ pub mod model {
 
 const API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 const BASE_URL: &str = "https://api.anthropic.com";
+/// Keys of the opaque blocks that carry a thinking block.
+const SIGNATURE: &str = "thought_signature";
+const REASONING: &str = "reasoning";
 
 pub struct AnthropicInference {
     client: Client,
@@ -38,11 +41,11 @@ impl AnthropicInference {
             .filter(|key| !key.is_empty())
             .ok_or_else(|| Error::new(format!("{API_KEY_ENV} is not set")))?;
 
-        Ok(Self::with_endpoint(model, &api_key, BASE_URL))
+        Self::with_endpoint(model, &api_key, BASE_URL)
     }
 
     /// Talks to the Messages API at `base_url` instead of Anthropic's.
-    pub fn with_endpoint(model: &str, api_key: &str, base_url: &str) -> Self {
+    pub fn with_endpoint(model: &str, api_key: &str, base_url: &str) -> Result<Self, Error> {
         let endpoint = Endpoint::from_owned(format!("{}/v1/", base_url.trim_end_matches('/')));
         let auth = AuthData::from_single(api_key);
         let target = ServiceTargetResolver::from_resolver_fn(
@@ -55,19 +58,23 @@ impl AnthropicInference {
             },
         );
 
-        // Without capture, the end of the stream carries no reply.
+        // Without capture, the end of the stream carries no reply. Reasoning
+        // is captured so thinking blocks can be sent back.
         let options = ChatOptions::default()
             .with_capture_content(true)
             .with_capture_tool_calls(true)
+            .with_capture_reasoning_content(true)
             .with_capture_usage(true);
+        let client = Client::builder()
+            .with_service_target_resolver(target)
+            .with_chat_options(options)
+            .build()
+            .map_err(to_error)?;
 
-        Self {
-            client: Client::builder()
-                .with_service_target_resolver(target)
-                .with_chat_options(options)
-                .build(),
+        Ok(Self {
+            client,
             model: format!("anthropic::{model}"),
-        }
+        })
     }
 }
 
@@ -133,10 +140,13 @@ fn to_content_part(block: &Block) -> Option<ContentPart> {
             fn_arguments: call.input.clone(),
             thought_signatures: None,
         })),
-        Block::Opaque(Value::String(signature)) => {
-            Some(ContentPart::ThoughtSignature(signature.clone()))
-        }
-        Block::Opaque(_) => None,
+        // A thinking block is a signature and the reasoning it signs; genai
+        // pairs them up by order.
+        Block::Opaque(opaque) => match (&opaque[SIGNATURE], &opaque[REASONING]) {
+            (Value::String(signature), _) => Some(ContentPart::ThoughtSignature(signature.clone())),
+            (_, Value::String(reasoning)) => Some(ContentPart::ReasoningContent(reasoning.clone())),
+            _ => None,
+        },
     }
 }
 
@@ -191,7 +201,12 @@ fn to_block(part: ContentPart) -> Option<Block> {
             name: call.fn_name,
             input: call.fn_arguments,
         })),
-        ContentPart::ThoughtSignature(signature) => Some(Block::Opaque(Value::String(signature))),
+        ContentPart::ThoughtSignature(signature) => {
+            Some(Block::Opaque(json!({SIGNATURE: signature})))
+        }
+        ContentPart::ReasoningContent(reasoning) => {
+            Some(Block::Opaque(json!({REASONING: reasoning})))
+        }
         _ => None,
     }
 }

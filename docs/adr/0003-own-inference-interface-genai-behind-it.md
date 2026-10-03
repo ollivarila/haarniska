@@ -58,19 +58,23 @@ before it has paid for itself.
 Gaps in genai 0.6.5 for Anthropic, found by reading its source:
 
 - **Thinking blocks are not kept** — they are neither captured from a reply
-  nor sent back. The 0.7 release candidate claims to fix this. Current models
-  think by default, so a tool-use turn sent back without them may be
-  rejected.
+  nor sent back. Current models think by default, so a tool-use turn sent
+  back without them may be rejected.
 - **No error flag on tool results** — an error has to say so in its text.
 - **Block order is rebuilt** — a reply comes back as text, then tool calls,
   not in the order the model wrote them.
 - **Output tokens are over-counted when streaming** — the count from the
   start of the message is added to the final, already cumulative, count.
 
+Update, same day: moved to the 0.7 release candidate. It keeps thinking
+blocks and counts output tokens correctly; both are covered by adapter
+tests. The error flag and block order are unchanged. The price is a
+pre-release dependency, pinned to an exact version.
+
 Further:
 
-- **Not yet checked against the real API** — everything above is from source
-  and from a local fake server.
+- **Checked against the real API only with a model that does not think** —
+  thinking is verified against a local fake server, not the real one.
 - **New provider features wait** on genai, or on a native adapter.
 - **Adapter tests go through the public interface** against a local server
   speaking the wire format, so they survive replacing genai.
