@@ -78,3 +78,39 @@ async fn text_reply_streams_deltas_then_the_whole_reply() {
         ]
     );
 }
+
+#[tokio::test]
+async fn last_message_is_a_cache_point() {
+    let server = server_replying(TEXT_REPLY).await;
+    let inference =
+        AnthropicInference::with_endpoint(model::CLAUDE_OPUS_5, "test-key", &server.uri());
+    let messages = [
+        Message::User("Say hello".into()),
+        Message::Assistant(vec![Block::Text("Hello".into())]),
+        Message::User("Again".into()),
+    ];
+
+    let _: Vec<Chunk> = inference
+        .infer(Request {
+            system: "",
+            messages: &messages,
+            tools: &[],
+        })
+        .try_collect()
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = requests[0].body_json().unwrap();
+    let cache_points: Vec<_> = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|message| message.to_string().contains("cache_control"))
+        .collect();
+    assert_eq!(cache_points, [false, false, true]);
+    assert_eq!(
+        body["messages"][2]["content"][0]["cache_control"],
+        serde_json::json!({"type": "ephemeral"})
+    );
+}

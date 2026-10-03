@@ -2,8 +2,8 @@
 
 use futures_util::{Stream, StreamExt, TryFutureExt, future};
 use genai::chat::{
-    ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent, ContentPart, MessageContent, StreamEnd,
-    Tool, ToolResponse,
+    CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent, ContentPart,
+    MessageContent, StreamEnd, Tool, ToolResponse,
 };
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{Client, ServiceTarget};
@@ -86,7 +86,12 @@ impl Inference for AnthropicInference {
 }
 
 fn to_chat_request(request: Request<'_>) -> ChatRequest {
-    let messages = request.messages.iter().map(to_chat_message).collect();
+    let mut messages: Vec<_> = request.messages.iter().map(to_chat_message).collect();
+    // A cache point on the last message caches everything up to it: tools,
+    // system prompt, and the conversation so far.
+    if let Some(last) = messages.pop() {
+        messages.push(last.with_options(CacheControl::Ephemeral));
+    }
     let tools = request.tools.iter().map(|tool| {
         Tool::new(tool.name.as_str())
             .with_description(tool.description.as_str())

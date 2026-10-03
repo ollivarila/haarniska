@@ -25,9 +25,11 @@ first adapter.
   limits. They are provider-specific and are not part of the request.
 - **Text streams, the reply arrives whole** — text comes as deltas for
   display. The complete reply, including tool calls, comes once at the end.
-- **Raw HTTP, async** — there is no official Rust SDK for the Anthropic
-  API. The adapter calls the Messages API directly. The interface is async,
-  as set in the public API spec.
+- **Built on genai, async** — there is no official Rust SDK for the
+  Anthropic API. The adapter uses the genai crate, hidden behind our
+  interface. See [ADR 0003](../adr/0003-own-inference-interface-genai-behind-it.md).
+- **Prompt caching is the adapter's job** — the neutral request says nothing
+  about caching. Each adapter caches the way its provider allows.
 
 ## 1. Boundary
 
@@ -145,6 +147,19 @@ unchanged on the next call. Thinking blocks are the case today.
 - **Stream** — text deltas are passed on as they arrive. Tool input arrives
   in fragments; the adapter joins and parses them before the reply is done.
 - **Stop reasons** — mapped to the four neutral ones.
+- **Prompt caching** — the last message of every request is marked as a
+  cache point. The provider then keeps everything up to it (tools, system
+  prompt, conversation) and the next request reads it back at a fraction of
+  the price. Each request moves the point forward.
+
+Caching in practice:
+
+- **Needs a stable start** — it only works while the tools and system prompt
+  stay the same through a session. They do.
+- **Short conversations are not cached** — the provider ignores a cache point
+  below a minimum size.
+- **Five minutes** — the provider's default lifetime. After a longer pause
+  the next request pays full price once.
 
 ## 6. Error handling
 
@@ -168,6 +183,6 @@ unchanged on the next call. Thinking blocks are the case today.
 3. Who retries, and how often?
 4. User messages beyond text (images, files).
 5. Do opaque blocks need a provider tag, for switching providers mid-session?
-6. Prompt caching: where are cache points set?
+6. A longer cache lifetime, and showing cache use to the user.
 7. Should thinking summaries and tool calls in progress be streamed for
    display?
