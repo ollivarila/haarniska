@@ -101,6 +101,22 @@ harness                            render thread
 - **Terminal state** — the screen is restored on quit and when the UI itself
   crashes.
 
+### Scrolling
+
+Example: a reply runs to 200 lines and the user wants the start of it.
+
+- **Following** — by default the transcript shows its newest lines and moves
+  as the reply streams.
+- **Scrolling back** — Page Up and Page Down move by a screen. Scrolling up
+  stops following: new output no longer moves what is on screen.
+- **Back to following** — scrolling down to the end, or pressing End.
+  Sending a prompt also returns to the end.
+- **Shown in the status line** — when not following, the status line says
+  so, and how to return.
+- **Whole session** — everything since the session started can be reached.
+- **While a turn runs** — scrolling works the same; it never blocks or
+  cancels the turn.
+
 ## 5. Error handling
 
 - **Turn fails** — the failure is shown in the transcript. The session
@@ -117,7 +133,9 @@ harness                            render thread
 1. Should a prompt sent during a turn be queued instead of ignored?
 2. A cancelled or failed turn leaves its prompt in the conversation. Should
    it be removed?
-3. Long output: scrolling, and how much of a tool result to show.
+3. How much of a tool result to show, and a way to expand it.
 4. Multi-line input and prompt history.
 5. Rendering markdown in replies.
 6. Must UIs be movable between threads?
+7. Scrolling with the mouse wheel. Capturing the mouse breaks the terminal's
+   own text selection.
