@@ -14,7 +14,7 @@ Build and tests must pass after making changes.
 Define error types with `thiserror`. Do not hand-write `Display` or
 `std::error::Error` impls for them.
 
-Always write public API first. Module should be read top down.
+Always write public API first. Module should be read top down. Constants still go first.
 
 ## Commits and changelog
 
