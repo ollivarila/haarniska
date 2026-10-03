@@ -5,6 +5,7 @@ pub mod plugin;
 use crate::Agent;
 use crate::inference::Inference;
 use crate::ui::Ui;
+use futures_util::{Stream, stream};
 use plugin::Plugin;
 
 pub enum Event {}
@@ -16,11 +17,11 @@ pub(crate) struct Harness<P> {
 }
 
 impl<P: Inference> Agent for Harness<P> {
-    fn prompt(&mut self, _text: &str) -> impl Iterator<Item = Event> {
-        std::iter::empty()
+    fn prompt(&mut self, _text: &str) -> impl Stream<Item = Event> {
+        stream::empty()
     }
 
-    fn run(self, _ui: impl Ui) {
+    async fn run(self, _ui: impl Ui) {
         todo!()
     }
 }

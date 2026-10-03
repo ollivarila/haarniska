@@ -21,12 +21,13 @@ struct CustomPlugin;
 
 impl Plugin for CustomPlugin {}
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let agent = haarniska::builder()
         .inference(TodoInference)
         .plugin(TodoBuiltinTools)
         .plugin(CustomPlugin)
         .build();
 
-    agent.run(Tui::new());
+    agent.run(Tui::new()).await;
 }

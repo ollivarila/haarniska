@@ -5,6 +5,7 @@ pub mod inference;
 pub mod tui;
 pub mod ui;
 
+use futures_util::Stream;
 use harness::plugin::Plugin;
 use harness::{Event, Harness};
 use inference::Inference;
@@ -12,10 +13,10 @@ use ui::Ui;
 
 pub trait Agent {
     /// One turn of the agentic loop.
-    fn prompt(&mut self, text: &str) -> impl Iterator<Item = Event>;
+    fn prompt(&mut self, text: &str) -> impl Stream<Item = Event>;
 
     /// Interactive session loop driving `ui`.
-    fn run(self, ui: impl Ui);
+    fn run(self, ui: impl Ui) -> impl Future<Output = ()>;
 }
 
 pub fn builder() -> AgentBuilder {

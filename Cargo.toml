@@ -8,3 +8,7 @@ keywords = ["agent", "llm", "harness", "ai"]
 categories = ["development-tools"]
 
 [dependencies]
+futures-util = "0.3.34"
+
+[dev-dependencies]
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread"] }
