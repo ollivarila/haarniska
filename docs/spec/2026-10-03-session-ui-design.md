@@ -96,6 +96,10 @@ harness                            render thread
   input line spans the window, between two horizontal rules.
 - **Transcript** — the user's prompts, the reply as it streams, each tool
   call with its result, failures.
+- **Tool calls** — one line: the tool's name and as much of its input as
+  fits. A lone text input, like a shell command, is shown bare. The result
+  follows directly below, indented, cut to its first lines with a count of
+  the rest.
 - **Status line** — startup times and token usage.
 - **Two startup times** — to the first frame, when the user can start
   typing, and to the agent being ready, when the harness first waits for

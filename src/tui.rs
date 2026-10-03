@@ -32,9 +32,16 @@ const RENDER_THREAD: &str = "haarniska-tui";
 /// from the harness.
 const TICK: Duration = Duration::from_millis(50);
 /// Lines of a tool result shown in the transcript.
-const RESULT_LINES: usize = 8;
+const RESULT_LINES: usize = 5;
 /// Lines the transcript moves per notch of the mouse wheel.
 const WHEEL_LINES: usize = 3;
+/// Shown before a tool call, and before its result and the lines after
+/// the result's first.
+const TOOL_MARKER: &str = "● ";
+const RESULT_MARKER: &str = "  ⎿ ";
+const RESULT_INDENT: &str = "    ";
+/// Stands for what was left out.
+const ELLIPSIS: &str = "…";
 /// Shown before the text being typed.
 const INPUT_MARKER: &str = "> ";
 /// Lines of a consent question shown at once.
@@ -289,33 +296,75 @@ impl Entry {
     }
 
     fn render(&self, width: usize) -> Vec<Line<'static>> {
-        let (prefix, style, breaks) = match self.kind {
+        // The first line starts with `prefix`, the others with `indent`.
+        let (prefix, indent, style, breaks) = match self.kind {
             EntryKind::Reply => {
                 let mut rows = markdown::lines(&self.text, width);
                 rows.push(Line::default());
                 return rows;
             }
-            EntryKind::User => (
-                INPUT_MARKER,
-                Style::new().fg(Color::Cyan).bold(),
-                Break::AtSpaces,
+            // No blank line after it: its result belongs to it.
+            EntryKind::Tool => return vec![tool_line(&self.text, width)],
+            EntryKind::User => {
+                let style = Style::new().fg(Color::Cyan).bold();
+                (INPUT_MARKER, "  ", style, Break::AtSpaces)
+            }
+            EntryKind::Output => (
+                RESULT_MARKER,
+                RESULT_INDENT,
+                Style::new().dim(),
+                Break::Anywhere,
             ),
-            EntryKind::Tool => ("* ", Style::new().fg(Color::Yellow), Break::Anywhere),
-            EntryKind::Error => ("  ", Style::new().fg(Color::Red), Break::Anywhere),
-            EntryKind::Note => ("  ", Style::new().dim(), Break::Anywhere),
+            EntryKind::Failure => {
+                let style = Style::new().fg(Color::Red);
+                (RESULT_MARKER, RESULT_INDENT, style, Break::Anywhere)
+            }
+            EntryKind::Error => ("  ", "  ", Style::new().fg(Color::Red), Break::AtSpaces),
+            EntryKind::Note => ("  ", "  ", Style::new().dim(), Break::AtSpaces),
         };
-        let text = format!("{prefix}{}", self.text);
-        let mut rows: Vec<_> = wrap_text(&text, style, width, breaks).collect();
+        let mut rows = Vec::new();
+        for (index, line) in self.text.lines().enumerate() {
+            let start = if index == 0 { prefix } else { indent };
+            let line = Line::styled(format!("{start}{line}"), style);
+            rows.extend(wrap(&line, width, breaks));
+        }
         rows.push(Line::default());
         rows
     }
+}
+
+/// A tool call on one line: a marker, the tool's name, and as much of its
+/// input as fits.
+fn tool_line(text: &str, width: usize) -> Line<'static> {
+    let (name, input) = text.split_once(' ').unwrap_or((text, ""));
+    let room = width.saturating_sub(TOOL_MARKER.chars().count() + name.chars().count() + 1);
+    let first_line = input.lines().next().unwrap_or_default();
+    let mut shown: String = first_line.chars().take(room).collect();
+    if shown != input {
+        // The marker takes the last column if there is none left.
+        if shown.chars().count() == room {
+            shown.pop();
+        }
+        shown.push_str(ELLIPSIS);
+    }
+    Line::from(vec![
+        TOOL_MARKER.yellow(),
+        name.to_owned().bold(),
+        " ".into(),
+        shown.dim(),
+    ])
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum EntryKind {
     User,
     Reply,
+    /// A tool call, by name and input.
     Tool,
+    /// What a tool call gave back, and the same for one that failed.
+    Output,
+    Failure,
+    /// A turn that failed.
     Error,
     Note,
 }
@@ -347,13 +396,14 @@ impl App {
                 _ => self.push(EntryKind::Reply, text),
             },
             Event::ToolStarted(call) => {
-                self.push(EntryKind::Tool, format!("{} {}", call.name, call.input));
+                let text = format!("{} {}", call.name, describe(&call.input));
+                self.push(EntryKind::Tool, text);
             }
             Event::ToolFinished(result) => {
                 let kind = if result.is_error {
-                    EntryKind::Error
+                    EntryKind::Failure
                 } else {
-                    EntryKind::Note
+                    EntryKind::Output
                 };
                 self.push(kind, first_lines(&result.output, RESULT_LINES));
             }
@@ -589,13 +639,7 @@ fn draw_question(frame: &mut Frame, area: Rect, tool: &str, lines: Vec<Line<'sta
 /// What a consent question shows between its lines: the call, then each reason.
 fn question_lines(request: &ApprovalRequest, screen_width: u16) -> Vec<Line<'static>> {
     let width = screen_width as usize;
-    // A lone text field, like a shell command, reads better bare.
-    let lone_text = request
-        .input
-        .as_object()
-        .filter(|fields| fields.len() == 1)
-        .and_then(|fields| fields.values().next()?.as_str());
-    let input = lone_text.map_or_else(|| request.input.to_string(), str::to_owned);
+    let input = describe(&request.input);
 
     let mut lines: Vec<_> =
         wrap_text(&input, Style::new().bold(), width, Break::Anywhere).collect();
@@ -676,11 +720,38 @@ fn wrap(line: &Line, width: usize, breaks: Break) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// The first `count` lines of `text`, with a marker if more were left out.
+/// A tool's input for reading: a lone text field, like a shell command,
+/// bare; otherwise each field by name.
+fn describe(input: &serde_json::Value) -> String {
+    let Some(fields) = input.as_object() else {
+        return input.to_string();
+    };
+    let bare = |value: &serde_json::Value| match value.as_str() {
+        Some(text) => text.to_owned(),
+        None => value.to_string(),
+    };
+    match fields.values().next() {
+        Some(value) if fields.len() == 1 => bare(value),
+        _ => {
+            let fields: Vec<_> = fields
+                .iter()
+                .map(|(name, value)| format!("{name}: {}", bare(value)))
+                .collect();
+            fields.join(", ")
+        }
+    }
+}
+
+/// The first `count` lines of `text`, saying how many more were left out.
+/// A text with nothing in it says so.
 fn first_lines(text: &str, count: usize) -> String {
-    let mut lines: Vec<&str> = text.lines().take(count).collect();
-    if text.lines().count() > count {
-        lines.push("...");
+    if text.trim().is_empty() {
+        return "(no output)".into();
+    }
+    let mut lines: Vec<String> = text.lines().take(count).map(str::to_owned).collect();
+    let left_out = text.lines().count().saturating_sub(count);
+    if left_out > 0 {
+        lines.push(format!("{ELLIPSIS} +{left_out} lines"));
     }
     lines.join("\n")
 }
@@ -691,6 +762,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::inference::{ToolCall, ToolResult};
 
     /// Ends a line in markdown; a newline alone does not.
     const LINE_BREAK: &str = "  \n";
@@ -795,6 +867,52 @@ mod tests {
 
         assert_eq!(app.input, "");
         assert!(answered.try_recv().is_err());
+    }
+
+    #[test]
+    fn tool_call_is_shown_on_one_line_above_its_result() {
+        let mut app = App::new(Instant::now());
+        let mut terminal = Terminal::new(TestBackend::new(30, 9)).unwrap();
+
+        app.apply(Event::ToolStarted(ToolCall {
+            id: "call_1".into(),
+            name: "shell".into(),
+            input: serde_json::json!({"command": "cargo test --all-targets --quiet"}),
+        }));
+        app.apply(Event::ToolFinished(ToolResult {
+            call_id: "call_1".into(),
+            output: "ok\nexit code 0".into(),
+            is_error: false,
+        }));
+
+        assert_eq!(
+            transcript(&mut app, &mut terminal),
+            [
+                "● shell cargo test --all-tar…",
+                "⎿ ok",
+                "exit code 0",
+                "",
+                ""
+            ]
+        );
+    }
+
+    #[test]
+    fn long_tool_result_says_how_much_was_left_out() {
+        let mut app = App::new(Instant::now());
+        let mut terminal = Terminal::new(TestBackend::new(30, 12)).unwrap();
+        let output: Vec<String> = (1..=8).map(|n| n.to_string()).collect();
+
+        app.apply(Event::ToolFinished(ToolResult {
+            call_id: "call_1".into(),
+            output: output.join("\n"),
+            is_error: false,
+        }));
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let rows = rows(&terminal, 4..6);
+        assert_eq!(rows[0].trim(), "5");
+        assert_eq!(rows[1].trim(), "… +3 lines");
     }
 
     #[test]
