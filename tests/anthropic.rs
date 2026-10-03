@@ -1,7 +1,7 @@
 //! `AnthropicInference` against a local server speaking the Messages API.
 
 use futures_util::TryStreamExt;
-use haarniska::inference::anthropic::AnthropicInference;
+use haarniska::inference::anthropic::{AnthropicInference, model};
 use haarniska::inference::{Block, Chunk, Inference, Message, Reply, Request, StopReason, Usage};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -43,7 +43,8 @@ async fn server_replying(sse: &str) -> MockServer {
 #[tokio::test]
 async fn text_reply_streams_deltas_then_the_whole_reply() {
     let server = server_replying(TEXT_REPLY).await;
-    let inference = AnthropicInference::with_endpoint("claude-opus-5", "test-key", &server.uri());
+    let inference =
+        AnthropicInference::with_endpoint(model::CLAUDE_OPUS_5, "test-key", &server.uri());
     let messages = [Message::User("Say hello".into())];
 
     let chunks: Vec<Chunk> = inference

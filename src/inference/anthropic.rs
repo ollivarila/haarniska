@@ -13,6 +13,15 @@ use crate::inference::{
     Block, Chunk, Error, Inference, Message, Reply, Request, StopReason, ToolCall, Usage,
 };
 
+/// Model IDs to pass to [`AnthropicInference::new`].
+pub mod model {
+    pub const CLAUDE_FABLE_5_1: &str = "claude-fable-5-1";
+    pub const CLAUDE_OPUS_5_5: &str = "claude-opus-5-5";
+    pub const CLAUDE_OPUS_5: &str = "claude-opus-5";
+    pub const CLAUDE_SONNET_5: &str = "claude-sonnet-5";
+    pub const CLAUDE_HAIKU_4_5: &str = "claude-haiku-4-5";
+}
+
 const API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 const BASE_URL: &str = "https://api.anthropic.com";
 
