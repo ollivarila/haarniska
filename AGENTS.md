@@ -11,6 +11,9 @@ Read `docs/` before building: `prd.md`, `spec/`, `adr/`. Follow the
 
 Build and tests must pass after making changes.
 
+Define error types with `thiserror`. Do not hand-write `Display` or
+`std::error::Error` impls for them.
+
 ## Commits and changelog
 
 - Use [Conventional Commits](https://www.conventionalcommits.org/):
