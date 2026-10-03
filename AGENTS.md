@@ -17,6 +17,6 @@ Build and tests must pass after making changes.
   `<type>(<scope>): <summary>`, e.g. `feat(core): add session store`. Types:
   `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`.
   Breaking changes use `!` (`feat(core)!: ...`).
-- User-visible changes get an entry under `## [Unreleased]` in `CHANGELOG.md`
-  (Keep a Changelog sections: Added, Changed, Deprecated, Removed, Fixed,
-  Security). Released sections are never edited.
+- `CHANGELOG.md` is generated from commit messages at release time. Do not
+  edit it by hand. Write `feat` and `fix` summaries so they make sense to a
+  user reading the changelog.
