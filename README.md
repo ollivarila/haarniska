@@ -1,6 +1,6 @@
 # haarniska
 
-Library-first, extensible coding agent harness. Under development.
+No bullshit library-first, extensible coding agent harness. Under development.
 
 See `examples` for demo.
 
@@ -8,6 +8,7 @@ Documentation in `docs` is mostly for agents but should be in readable state.
 
 ## Features
 
+- **You pick the name** — use the library to build a binary of your own.
 - **Fast startup** — prompt on screen in a few milliseconds; the rest starts
   up behind it.
 - **Highly customizable** — flexible API designed for custom usage.
@@ -21,6 +22,15 @@ Documentation in `docs` is mostly for agents but should be in readable state.
 - **Core Agent loop** — streams the reply, runs tool calls, repeats until done.
 - **Terminal UI** — minimalistic streaming UI.
 - **Headless mode** — run your agent without UI if you want.
+
+## Future feature ideas
+
+- Telemetry
+- Render responses as markdown
+- Auto-mode
+- MCP support
+- Plugin support
+- More providers
 
 ## Architecture
 
@@ -76,3 +86,11 @@ stream. Without an approver, a call a hook wants consent for is blocked.
 ## License
 
 MIT
+
+## Contributing
+
+Not expecting any external contributions right now. Please open issue before anything and let's discuss.
+
+## Backlog
+
+- Release automation & CI
