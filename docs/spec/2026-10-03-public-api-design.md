@@ -25,12 +25,13 @@ interface, event types, errors) are later specs.
 - **UI is passive** — the harness drives the UI. The UI does not drive the
   agent.
 - **Headless by default** — an agent is fully usable with no UI.
-- **Tools extend the harness** — there is no plugin type for now. A plugin
-  is simply a crate that provides tools.
+- **Tools and hooks extend the harness** — there is no plugin type for now.
+  A plugin is simply a crate that provides them.
 - **Async, on Tokio** — tools will depend on async libraries (HTTP clients,
   MCP, language servers), and changing later would break every tool.
   Cancelling a turn is dropping it.
-- **No hooks yet** — nothing can yet block, change, or observe the loop.
+- **Hooks around tool calls** — see the
+  [hooks spec](2026-10-03-hooks-design.md).
 
 ## 1. Model
 

@@ -16,8 +16,8 @@ themselves (read, write, edit, shell) are a later spec.
 
 ## Locked decisions
 
-- **Tools only** — there is no plugin type for now. A plugin is simply a crate
-  that provides tools.
+- **No plugin type** — for now. A plugin is simply a crate that provides
+  tools, and [hooks](2026-10-03-hooks-design.md).
 - **Registered on the builder** — one by one, before the agent is built.
 - **Typed input** — a tool declares its input as a type. The schema shown to
   the model is derived from it, and the harness parses the input before the
