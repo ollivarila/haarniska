@@ -1,5 +1,6 @@
 //! The harness: agent loop and everything around the model.
 
+pub mod hook;
 pub mod instructions;
 pub mod tool;
 
@@ -17,6 +18,7 @@ use crate::inference::{
     Usage,
 };
 use crate::ui::{Input, Ui};
+use hook::{Decision, DynHook};
 use tool::{DynTool, ToolCx, ToolError};
 
 /// What happens during a turn, in order.
@@ -41,6 +43,7 @@ pub(crate) struct Harness<I> {
     inference: I,
     tools: Vec<Box<dyn DynTool>>,
     tool_specs: Vec<ToolSpec>,
+    hooks: Vec<Box<dyn DynHook>>,
     tool_cx: ToolCx,
     system_prompt: String,
     messages: Vec<Message>,
@@ -86,9 +89,15 @@ impl<I: Inference> Agent for Harness<I> {
                 }
 
                 let mut results = Vec::new();
-                for call in calls {
+                for mut call in calls {
+                    let allowed = self.before_tool(&mut call).await;
                     yield Event::ToolStarted(call.clone());
-                    let result = self.run_tool(call).await;
+                    let outcome = match allowed {
+                        Ok(()) => self.run_tool(&call).await,
+                        Err(blocked) => Err(blocked),
+                    };
+                    let mut result = to_result(&call, outcome);
+                    self.after_tool(&call, &mut result).await;
                     yield Event::ToolFinished(result.clone());
                     results.push(result);
                 }
@@ -137,6 +146,7 @@ impl<I> Harness<I> {
     pub(crate) fn new(
         inference: I,
         tools: Vec<Box<dyn DynTool>>,
+        hooks: Vec<Box<dyn DynHook>>,
         system_prompt: String,
         cwd: PathBuf,
     ) -> Self {
@@ -144,6 +154,7 @@ impl<I> Harness<I> {
             tool_specs: tools.iter().map(|tool| tool.spec()).collect(),
             inference,
             tools,
+            hooks,
             tool_cx: ToolCx::new(cwd),
             system_prompt,
             messages: Vec::new(),
@@ -159,37 +170,79 @@ impl<I> Harness<I> {
         }
     }
 
-    /// Runs one tool call. Every failure becomes an error result, so the
-    /// model can react and the turn goes on.
-    async fn run_tool(&self, call: ToolCall) -> ToolResult {
-        let tool = self
+    /// Asks every hook, in order, whether `call` may run. Hooks may change
+    /// its input.
+    async fn before_tool(&self, call: &mut ToolCall) -> Result<(), CallError> {
+        for hook in &self.hooks {
+            let decision = hook.before_tool(&self.tool_cx, &call.name, &mut call.input);
+            match AssertUnwindSafe(decision).catch_unwind().await {
+                Ok(Decision::Continue) => {}
+                Ok(Decision::Block(reason)) => return Err(CallError::Blocked(reason)),
+                // A guard that fails must not let the call through.
+                Err(_) => return Err(CallError::HookCrashed),
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs one tool call. A failure, also a crash, is returned as an error
+    /// so the model can react and the turn goes on.
+    async fn run_tool(&self, call: &ToolCall) -> Result<String, CallError> {
+        let index = self
             .tool_specs
             .iter()
-            .position(|spec| spec.name == call.name);
-        let outcome = match tool {
-            Some(index) => {
-                let run = self.tools[index].call(&self.tool_cx, call.input);
-                match AssertUnwindSafe(run).catch_unwind().await {
-                    Ok(outcome) => outcome,
-                    Err(_) => Err(ToolError::other("the tool crashed")),
-                }
-            }
-            None => Err(ToolError::other(format!("no tool named `{}`", call.name))),
-        };
-
-        match outcome {
-            Ok(output) => ToolResult {
-                call_id: call.id,
-                output,
-                is_error: false,
-            },
-            // Not every adapter passes `is_error` on, so the text says it too.
-            Err(error) => ToolResult {
-                call_id: call.id,
-                output: format!("Error: {error}"),
-                is_error: true,
-            },
+            .position(|spec| spec.name == call.name)
+            .ok_or_else(|| CallError::UnknownTool(call.name.clone()))?;
+        let run = self.tools[index].call(&self.tool_cx, call.input.clone());
+        match AssertUnwindSafe(run).catch_unwind().await {
+            Ok(outcome) => Ok(outcome?),
+            Err(_) => Err(CallError::ToolCrashed),
         }
+    }
+
+    /// Lets every hook, in order, change `result`. A hook that crashes
+    /// leaves it as it was.
+    async fn after_tool(&self, call: &ToolCall, result: &mut ToolResult) {
+        for hook in &self.hooks {
+            let before = result.clone();
+            let changed = hook.after_tool(&self.tool_cx, call, result);
+            if AssertUnwindSafe(changed).catch_unwind().await.is_err() {
+                *result = before;
+            }
+            // A result always belongs to its call.
+            result.call_id.clone_from(&call.id);
+        }
+    }
+}
+
+/// Why a tool call gave no output. The message is what the model is told.
+#[derive(Debug, thiserror::Error)]
+enum CallError {
+    #[error(transparent)]
+    Tool(#[from] ToolError),
+    #[error("no tool named `{0}`")]
+    UnknownTool(String),
+    #[error("the tool crashed")]
+    ToolCrashed,
+    #[error("blocked by a hook: {0}")]
+    Blocked(String),
+    #[error("blocked: a hook crashed")]
+    HookCrashed,
+}
+
+fn to_result(call: &ToolCall, outcome: Result<String, CallError>) -> ToolResult {
+    match outcome {
+        Ok(output) => ToolResult {
+            call_id: call.id.clone(),
+            output,
+            is_error: false,
+        },
+        // Not every adapter passes `is_error` on, so the text says it too.
+        Err(error) => ToolResult {
+            call_id: call.id.clone(),
+            output: format!("Error: {error}"),
+            is_error: true,
+        },
     }
 }
 

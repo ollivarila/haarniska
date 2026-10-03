@@ -9,6 +9,7 @@ pub mod ui;
 use std::path::PathBuf;
 
 use futures_util::Stream;
+use harness::hook::{DynHook, Hook};
 use harness::instructions::Instructions;
 use harness::tool::{DynTool, Tool};
 use harness::{Event, Harness};
@@ -29,6 +30,7 @@ pub fn builder() -> AgentBuilder {
     AgentBuilder {
         inference: (),
         tools: Vec::new(),
+        hooks: Vec::new(),
         system_prompt: DEFAULT_SYSTEM_PROMPT.into(),
         instructions: Instructions::default(),
         cwd: ".".into(),
@@ -38,6 +40,7 @@ pub fn builder() -> AgentBuilder {
 pub struct AgentBuilder<I = ()> {
     inference: I,
     tools: Vec<Box<dyn DynTool>>,
+    hooks: Vec<Box<dyn DynHook>>,
     system_prompt: String,
     instructions: Instructions,
     cwd: PathBuf,
@@ -48,6 +51,7 @@ impl AgentBuilder {
         AgentBuilder {
             inference,
             tools: self.tools,
+            hooks: self.hooks,
             system_prompt: self.system_prompt,
             instructions: self.instructions,
             cwd: self.cwd,
@@ -67,6 +71,12 @@ impl<I> AgentBuilder<I> {
             .with_tool(tools::Write)
             .with_tool(tools::Edit)
             .with_tool(tools::Shell)
+    }
+
+    /// Adds a hook. Hooks run around every tool call, in the order added.
+    pub fn with_hook(mut self, hook: impl Hook) -> Self {
+        self.hooks.push(Box::new(hook));
+        self
     }
 
     /// Replaces the default system prompt.
@@ -93,6 +103,12 @@ impl<I> AgentBuilder<I> {
 impl<I: Inference> AgentBuilder<I> {
     pub fn build(self) -> impl Agent {
         let system_prompt = self.instructions.append_to(self.system_prompt);
-        Harness::new(self.inference, self.tools, system_prompt, self.cwd)
+        Harness::new(
+            self.inference,
+            self.tools,
+            self.hooks,
+            system_prompt,
+            self.cwd,
+        )
     }
 }

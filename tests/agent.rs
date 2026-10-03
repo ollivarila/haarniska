@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use futures_util::{Stream, StreamExt, stream};
 use haarniska::Agent;
 use haarniska::harness::Event;
+use haarniska::harness::hook::{Decision, Hook};
 use haarniska::harness::instructions::Instructions;
 use haarniska::harness::tool::{Tool, ToolCx, ToolError};
 use haarniska::inference::{
@@ -16,7 +17,7 @@ use haarniska::inference::{
 use haarniska::ui::{Input, Ui};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -189,6 +190,180 @@ async fn next_prompt_continues_the_conversation() {
             Message::User("How are you?".into()),
         ]
     );
+}
+
+#[tokio::test]
+async fn hook_blocks_a_call_and_the_model_is_told_why() {
+    let sandbox = TempDir::new().unwrap();
+    let call = tool_call("write", json!({"path": "a.txt", "content": "hi"}));
+    let (inference, _requests) =
+        ScriptedInference::new([tool_reply(call.clone()), text_reply("Understood.")]);
+    let mut agent = haarniska::builder()
+        .with_inference(inference)
+        .with_default_tools()
+        .with_hook(BlockWrites)
+        .with_cwd(sandbox.path())
+        .build();
+
+    let events: Vec<Event> = agent.prompt("Write a.txt").collect().await;
+
+    let result = tool_result(&events);
+    assert!(result.is_error);
+    assert_eq!(
+        result.output,
+        "Error: blocked by a hook: writing is not allowed"
+    );
+    assert!(!sandbox.path().join("a.txt").exists());
+    assert_eq!(events[0], Event::ToolStarted(call));
+    assert_eq!(events.last(), Some(&done()));
+}
+
+#[tokio::test]
+async fn hook_changes_the_input_a_tool_runs_with() {
+    let sandbox = TempDir::new().unwrap();
+    let (inference, _requests) = ScriptedInference::new([
+        tool_reply(tool_call(
+            "write",
+            json!({"path": "a.txt", "content": "hi"}),
+        )),
+        text_reply("Written."),
+    ]);
+    let mut agent = haarniska::builder()
+        .with_inference(inference)
+        .with_default_tools()
+        .with_hook(WriteElsewhere)
+        .with_cwd(sandbox.path())
+        .build();
+
+    let events: Vec<Event> = agent.prompt("Write a.txt").collect().await;
+
+    assert!(!sandbox.path().join("a.txt").exists());
+    let written = std::fs::read_to_string(sandbox.path().join("b.txt")).unwrap();
+    assert_eq!(written, "hi");
+    assert_eq!(
+        events[0],
+        Event::ToolStarted(tool_call(
+            "write",
+            json!({"path": "b.txt", "content": "hi"})
+        ))
+    );
+}
+
+#[tokio::test]
+async fn hooks_change_the_result_in_the_order_they_were_added() {
+    let (inference, requests) = ScriptedInference::new([
+        tool_reply(tool_call("shell", json!({"command": "printf out"}))),
+        text_reply("Done."),
+    ]);
+    let mut agent = haarniska::builder()
+        .with_inference(inference)
+        .with_default_tools()
+        .with_hook(Append("-first"))
+        .with_hook(Append("-second"))
+        .build();
+
+    let events: Vec<Event> = agent.prompt("Run it").collect().await;
+
+    assert_eq!(tool_result(&events).output, "out-first-second");
+    let Message::ToolResults(results) = &requests.lock().unwrap()[1].messages[2] else {
+        panic!("the model is sent the tool results");
+    };
+    assert_eq!(results[0].output, "out-first-second");
+}
+
+#[tokio::test]
+async fn hook_crashing_before_a_call_blocks_it() {
+    let sandbox = TempDir::new().unwrap();
+    let (inference, _requests) = ScriptedInference::new([
+        tool_reply(tool_call(
+            "write",
+            json!({"path": "a.txt", "content": "hi"}),
+        )),
+        text_reply("Sorry."),
+    ]);
+    let mut agent = haarniska::builder()
+        .with_inference(inference)
+        .with_default_tools()
+        .with_hook(CrashBefore)
+        .with_cwd(sandbox.path())
+        .build();
+
+    let events: Vec<Event> = agent.prompt("Write a.txt").collect().await;
+
+    let result = tool_result(&events);
+    assert!(result.is_error);
+    assert_eq!(result.output, "Error: blocked: a hook crashed");
+    assert!(!sandbox.path().join("a.txt").exists());
+    assert_eq!(events.last(), Some(&done()));
+}
+
+#[tokio::test]
+async fn hook_crashing_after_a_call_leaves_the_result_alone() {
+    let (inference, _requests) = ScriptedInference::new([
+        tool_reply(tool_call("shell", json!({"command": "printf out"}))),
+        text_reply("Done."),
+    ]);
+    let mut agent = haarniska::builder()
+        .with_inference(inference)
+        .with_default_tools()
+        .with_hook(CrashAfter)
+        .with_hook(Append("-kept"))
+        .build();
+
+    let events: Vec<Event> = agent.prompt("Run it").collect().await;
+
+    let result = tool_result(&events);
+    assert!(!result.is_error);
+    assert_eq!(result.output, "out-kept");
+    assert_eq!(events.last(), Some(&done()));
+}
+
+struct BlockWrites;
+
+impl Hook for BlockWrites {
+    async fn before_tool(&self, _cx: &ToolCx, tool: &str, _input: &mut Value) -> Decision {
+        if tool == "write" {
+            return Decision::Block("writing is not allowed".into());
+        }
+        Decision::Continue
+    }
+}
+
+/// Sends every write to `b.txt`.
+struct WriteElsewhere;
+
+impl Hook for WriteElsewhere {
+    async fn before_tool(&self, _cx: &ToolCx, _tool: &str, input: &mut Value) -> Decision {
+        input["path"] = json!("b.txt");
+        Decision::Continue
+    }
+}
+
+/// Adds its text to the end of every result.
+struct Append(&'static str);
+
+impl Hook for Append {
+    async fn after_tool(&self, _cx: &ToolCx, _call: &ToolCall, result: &mut ToolResult) {
+        result.output.push_str(self.0);
+    }
+}
+
+struct CrashBefore;
+
+impl Hook for CrashBefore {
+    async fn before_tool(&self, _cx: &ToolCx, _tool: &str, _input: &mut Value) -> Decision {
+        panic!("boom")
+    }
+}
+
+/// Spoils the result, then crashes.
+struct CrashAfter;
+
+impl Hook for CrashAfter {
+    async fn after_tool(&self, _cx: &ToolCx, _call: &ToolCall, result: &mut ToolResult) {
+        result.output = "spoiled".into();
+        panic!("boom")
+    }
 }
 
 #[tokio::test]
@@ -466,7 +641,7 @@ fn tool_reply(call: ToolCall) -> Reply {
     }
 }
 
-fn tool_call(name: &str, input: serde_json::Value) -> ToolCall {
+fn tool_call(name: &str, input: Value) -> ToolCall {
     ToolCall {
         id: "call_1".into(),
         name: name.into(),
