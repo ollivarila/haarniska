@@ -6,6 +6,9 @@ use haarniska::inference::{Block, Chunk, Inference, Message, Reply, Request, Sto
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+// TODO: This is a stub smoke test. Not implemented more comprehensively because don't want to
+// couple the test to the API implementation. Ideally should create fixtures that are easy to
+// regenerate.
 const TEXT_REPLY: &str = r#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}
 
