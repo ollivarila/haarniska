@@ -108,7 +108,7 @@ struct Usage { input_tokens: u64, output_tokens: u64 }
 - **Usage is minimal** — the two counts every provider has. Finer detail
   stays in the adapter.
 - **Open to growth** — every enum can gain variants without breaking
-  adapters or plugins.
+  adapters or tools.
 
 ## 3. A turn, traced
 
