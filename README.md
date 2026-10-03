@@ -20,13 +20,13 @@ Documentation in `docs` is mostly for agents but should be in readable state.
 - **Skills** — Agent Skills format, loaded on demand.
 - **Anthropic API inference provider** — use Anthropic models or build your own provider.
 - **Core Agent loop** — streams the reply, runs tool calls, repeats until done.
-- **Terminal UI** — minimalistic streaming UI.
+- **Terminal UI** — minimalistic streaming UI, replies rendered as markdown
+  with syntax highlighting.
 - **Headless mode** — run your agent without UI if you want.
 
 ## Future feature ideas
 
 - Telemetry
-- Render responses as markdown
 - Auto-mode
 - MCP support
 - Plugin support

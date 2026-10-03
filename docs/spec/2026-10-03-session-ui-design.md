@@ -146,6 +146,27 @@ Example: a reply runs to 200 lines and the user wants the start of it.
 - **While a turn runs** — scrolling works the same; it never blocks or
   cancels the turn.
 
+### Markdown
+
+Example: the model answers with a heading, a list, and a Rust code block.
+
+- **Replies only** — the model's reply is shown as markdown. Prompts, tool
+  calls, and tool results stay as typed.
+- **Shown** — headings, emphasis, lists, quotes, links, tables, inline code,
+  and code blocks. The markup itself is not shown. A link shows its address
+  after its text.
+- **Code blocks** — highlighted by language when the language is known,
+  otherwise one colour. The fence lines are left out.
+- **Wrapping** — text breaks at spaces. Code is cut at the window width, so
+  its layout holds. Tables are laid out to the window width. The rows a
+  list item or quote continues on are not indented.
+- **Around a code block** — the text before and after is rendered
+  separately. A list with a code block in it shows as two lists.
+- **Colours, no backgrounds** — a background ends where each line's text
+  does and shows as ragged bars.
+- **While streaming** — the reply so far is rendered on each update.
+  Unfinished markup shows as best it can and settles when the rest arrives.
+
 ## 5. Error handling
 
 - **Turn fails** — the failure is shown in the transcript. The session
@@ -164,5 +185,6 @@ Example: a reply runs to 200 lines and the user wants the start of it.
    it be removed?
 3. How much of a tool result to show, and a way to expand it.
 4. Multi-line input and prompt history.
-5. Rendering markdown in replies.
-6. Must UIs be movable between threads?
+5. Must UIs be movable between threads?
+6. Highlighting adds a heavy dependency for every user of the crate. Should
+   it be optional?

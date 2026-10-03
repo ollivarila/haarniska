@@ -1,5 +1,7 @@
 //! Terminal UI.
 
+mod markdown;
+
 use std::io;
 use std::panic;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +16,7 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -271,6 +273,42 @@ struct App {
 struct Entry {
     kind: EntryKind,
     text: String,
+    /// The entry as screen lines at a width, until its text changes.
+    rows: Option<(usize, Vec<Line<'static>>)>,
+}
+
+impl Entry {
+    /// The entry as screen lines no wider than `width`, with the blank
+    /// line that ends it.
+    fn rows(&mut self, width: usize) -> &[Line<'static>] {
+        let rows = match self.rows.take() {
+            Some((at, rows)) if at == width => rows,
+            _ => self.render(width),
+        };
+        &self.rows.insert((width, rows)).1
+    }
+
+    fn render(&self, width: usize) -> Vec<Line<'static>> {
+        let (prefix, style, breaks) = match self.kind {
+            EntryKind::Reply => {
+                let mut rows = markdown::lines(&self.text, width);
+                rows.push(Line::default());
+                return rows;
+            }
+            EntryKind::User => (
+                INPUT_MARKER,
+                Style::new().fg(Color::Cyan).bold(),
+                Break::AtSpaces,
+            ),
+            EntryKind::Tool => ("* ", Style::new().fg(Color::Yellow), Break::Anywhere),
+            EntryKind::Error => ("  ", Style::new().fg(Color::Red), Break::Anywhere),
+            EntryKind::Note => ("  ", Style::new().dim(), Break::Anywhere),
+        };
+        let text = format!("{prefix}{}", self.text);
+        let mut rows: Vec<_> = wrap_text(&text, style, width, breaks).collect();
+        rows.push(Line::default());
+        rows
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -302,7 +340,10 @@ impl App {
     fn apply(&mut self, event: Event) {
         match event {
             Event::Text(text) => match self.transcript.last_mut() {
-                Some(entry) if entry.kind == EntryKind::Reply => entry.text.push_str(&text),
+                Some(entry) if entry.kind == EntryKind::Reply => {
+                    entry.text.push_str(&text);
+                    entry.rows = None;
+                }
                 _ => self.push(EntryKind::Reply, text),
             },
             Event::ToolStarted(call) => {
@@ -443,12 +484,24 @@ impl App {
     /// otherwise the newest lines, so it follows the reply.
     fn draw_transcript(&mut self, frame: &mut Frame, area: Rect) {
         let padding = Padding::left(1);
-        let lines = self.lines(area.width.saturating_sub(padding.left) as usize);
+        let width = area.width.saturating_sub(padding.left) as usize;
+        let total: usize = self
+            .transcript
+            .iter_mut()
+            .map(|entry| entry.rows(width).len())
+            .sum();
         self.page = (area.height as usize).max(1);
-        self.max_top = lines.len().saturating_sub(self.page);
+        self.max_top = total.saturating_sub(self.page);
         self.top = self.top.filter(|top| *top < self.max_top);
         let top = self.top.unwrap_or(self.max_top);
-        let visible: Vec<_> = lines.into_iter().skip(top).take(self.page).collect();
+        let visible: Vec<_> = self
+            .transcript
+            .iter_mut()
+            .flat_map(|entry| entry.rows(width))
+            .skip(top)
+            .take(self.page)
+            .cloned()
+            .collect();
         let block = Block::new().padding(padding);
         frame.render_widget(Paragraph::new(visible).block(block), area);
     }
@@ -505,27 +558,12 @@ impl App {
         ])
     }
 
-    /// The transcript as screen lines, wrapped to `width`.
-    fn lines(&self, width: usize) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
-        for entry in &self.transcript {
-            let (prefix, style) = match entry.kind {
-                EntryKind::User => (INPUT_MARKER, Style::new().fg(Color::Cyan).bold()),
-                EntryKind::Reply => ("", Style::new()),
-                EntryKind::Tool => ("* ", Style::new().fg(Color::Yellow)),
-                EntryKind::Error => ("  ", Style::new().fg(Color::Red)),
-                EntryKind::Note => ("  ", Style::new().dim()),
-            };
-            for row in wrap(&format!("{prefix}{}", entry.text), width) {
-                lines.push(Line::styled(row, style));
-            }
-            lines.push(Line::default());
-        }
-        lines
-    }
-
     fn push(&mut self, kind: EntryKind, text: String) {
-        self.transcript.push(Entry { kind, text });
+        self.transcript.push(Entry {
+            kind,
+            text,
+            rows: None,
+        });
     }
 }
 
@@ -559,16 +597,15 @@ fn question_lines(request: &ApprovalRequest, screen_width: u16) -> Vec<Line<'sta
         .and_then(|fields| fields.values().next()?.as_str());
     let input = lone_text.map_or_else(|| request.input.to_string(), str::to_owned);
 
-    let mut lines: Vec<_> = wrap(&input, width)
-        .into_iter()
-        .map(|row| Line::from(row).bold())
-        .collect();
+    let mut lines: Vec<_> =
+        wrap_text(&input, Style::new().bold(), width, Break::Anywhere).collect();
     for reason in &request.reasons {
-        lines.extend(
-            wrap(reason, width)
-                .into_iter()
-                .map(|row| Line::from(row).dim()),
-        );
+        lines.extend(wrap_text(
+            reason,
+            Style::new().dim(),
+            width,
+            Break::AtSpaces,
+        ));
     }
     if lines.len() > QUESTION_LINES {
         lines.truncate(QUESTION_LINES - 1);
@@ -577,20 +614,66 @@ fn question_lines(request: &ApprovalRequest, screen_width: u16) -> Vec<Line<'sta
     lines
 }
 
-/// `text` as screen rows no wider than `width`. Counts characters, so wide
-/// ones may overflow.
-fn wrap(text: &str, width: usize) -> Vec<String> {
+/// Where a line too long for the screen may be broken.
+#[derive(Clone, Copy, PartialEq)]
+enum Break {
+    /// At a space where there is one: for text.
+    AtSpaces,
+    /// At the width, so the layout holds: for code and commands.
+    Anywhere,
+}
+
+/// `text` in one style, as screen lines no wider than `width`.
+fn wrap_text(
+    text: &str,
+    style: Style,
+    width: usize,
+    breaks: Break,
+) -> impl Iterator<Item = Line<'static>> {
+    text.lines()
+        .flat_map(move |line| wrap(&Line::styled(line, style), width, breaks))
+}
+
+/// `line` as screen lines no wider than `width`. Styles are kept. Counts
+/// characters, so wide ones may overflow.
+fn wrap(line: &Line, width: usize, breaks: Break) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let chars: Vec<(char, Style)> = line
+        .spans
+        .iter()
+        .flat_map(|span| span.content.chars().map(|c| (c, span.style)))
+        .collect();
+
     let mut rows = Vec::new();
-    for line in text.lines() {
-        let chars: Vec<char> = line.chars().collect();
-        if chars.is_empty() {
-            rows.push(String::new());
-        }
-        for row in chars.chunks(width.max(1)) {
-            rows.push(row.iter().collect());
-        }
+    let mut rest = chars.as_slice();
+    while rest.len() > width {
+        // The last space that still leaves the row within the width.
+        let space = rest[..=width].iter().rposition(|(c, _)| *c == ' ');
+        let (row, skip) = match space {
+            Some(at) if breaks == Break::AtSpaces && at > 0 => (&rest[..at], 1),
+            _ => (&rest[..width], 0),
+        };
+        rows.push(row);
+        rest = &rest[row.len() + skip..];
     }
-    rows
+    rows.push(rest);
+
+    rows.into_iter()
+        .map(|row| {
+            let spans: Vec<Span> = row
+                .chunk_by(|(_, a), (_, b)| a == b)
+                .map(|run| {
+                    let text: String = run.iter().map(|(c, _)| c).collect();
+                    Span::styled(text, run[0].1)
+                })
+                .collect();
+            Line {
+                spans,
+                style: line.style,
+                alignment: line.alignment,
+            }
+        })
+        .collect()
 }
 
 /// The first `count` lines of `text`, with a marker if more were left out.
@@ -609,12 +692,15 @@ mod tests {
 
     use super::*;
 
+    /// Ends a line in markdown; a newline alone does not.
+    const LINE_BREAK: &str = "  \n";
+
     /// An app showing a reply of the lines "1" to `count`, on a screen with
     /// room for five transcript lines.
     fn app_with_reply(count: usize) -> (App, Terminal<TestBackend>) {
         let mut app = App::new(Instant::now());
         let reply: Vec<String> = (1..=count).map(|n| n.to_string()).collect();
-        app.apply(Event::Text(reply.join("\n")));
+        app.apply(Event::Text(reply.join(LINE_BREAK)));
         let mut terminal = Terminal::new(TestBackend::new(60, 9)).unwrap();
         transcript(&mut app, &mut terminal);
         (app, terminal)
@@ -632,8 +718,12 @@ mod tests {
     /// The screen rows `ys`, as text.
     fn rows(terminal: &Terminal<TestBackend>, ys: std::ops::Range<u16>) -> Vec<String> {
         let buffer = terminal.backend().buffer();
-        ys.map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect())
-            .collect()
+        ys.map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        })
+        .collect()
     }
 
     fn press(app: &mut App, code: KeyCode) {
@@ -708,10 +798,59 @@ mod tests {
     }
 
     #[test]
+    fn reply_is_shown_as_markdown() {
+        let mut app = App::new(Instant::now());
+        let mut terminal = Terminal::new(TestBackend::new(60, 9)).unwrap();
+
+        app.apply(Event::Text("# Title\nUse **bold** and `code`.".into()));
+
+        assert_eq!(
+            transcript(&mut app, &mut terminal),
+            ["Title", "", "Use bold and code.", "", ""]
+        );
+    }
+
+    #[test]
+    fn code_block_is_shown_without_fences_and_keeps_its_layout() {
+        let mut app = App::new(Instant::now());
+        let mut terminal = Terminal::new(TestBackend::new(12, 9)).unwrap();
+
+        app.apply(Event::Text("```rust\nlet a = 1 + 22;\n  b();\n```".into()));
+
+        // After the one column of padding: cut at the width, indent kept.
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let rows = rows(&terminal, 0..3);
+        assert_eq!(rows, [" let a = 1 +", "  22;       ", "   b();     "]);
+    }
+
+    #[test]
+    fn typescript_is_highlighted() {
+        let mut app = App::new(Instant::now());
+        let mut terminal = Terminal::new(TestBackend::new(60, 9)).unwrap();
+
+        app.apply(Event::Text("```typescript\nconst a = 1;\n```".into()));
+
+        assert_eq!(transcript(&mut app, &mut terminal)[0], "const a = 1;");
+        let colour = terminal.backend().buffer()[(1, 0)].fg;
+        assert!(matches!(colour, Color::Rgb(..)), "{colour:?}");
+    }
+
+    #[test]
+    fn long_reply_lines_break_at_spaces() {
+        let mut app = App::new(Instant::now());
+        let mut terminal = Terminal::new(TestBackend::new(12, 9)).unwrap();
+
+        app.apply(Event::Text("alpha beta gamma delta".into()));
+
+        let rows = transcript(&mut app, &mut terminal);
+        assert_eq!(rows[..2], ["alpha beta", "gamma delta"]);
+    }
+
+    #[test]
     fn transcript_follows_the_newest_output() {
         let (mut app, mut terminal) = app_with_reply(20);
 
-        app.apply(Event::Text("\n21".into()));
+        app.apply(Event::Text(format!("{LINE_BREAK}21")));
 
         // The last line on screen is the blank one that ends an entry.
         assert_eq!(
@@ -725,7 +864,7 @@ mod tests {
         let (mut app, mut terminal) = app_with_reply(20);
 
         press(&mut app, KeyCode::PageUp);
-        app.apply(Event::Text("\n21".into()));
+        app.apply(Event::Text(format!("{LINE_BREAK}21")));
 
         assert_eq!(
             transcript(&mut app, &mut terminal),
@@ -771,7 +910,7 @@ mod tests {
         transcript(&mut app, &mut terminal);
 
         press(&mut app, KeyCode::PageDown);
-        app.apply(Event::Text("\n21".into()));
+        app.apply(Event::Text(format!("{LINE_BREAK}21")));
 
         assert_eq!(
             transcript(&mut app, &mut terminal),
