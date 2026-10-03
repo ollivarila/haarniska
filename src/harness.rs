@@ -1,19 +1,19 @@
 //! The harness: agent loop and everything around the model.
 
-pub mod plugin;
+pub mod tool;
 
 use crate::Agent;
 use crate::inference::Inference;
 use crate::ui::Ui;
 use futures_util::{Stream, stream};
-use plugin::Plugin;
+use tool::DynTool;
 
 pub enum Event {}
 
-/// Plugins and the loops that run them against a model.
+/// The loops that run tools against a model.
 pub(crate) struct Harness<P> {
     pub(crate) inference: P,
-    pub(crate) plugins: Vec<Box<dyn Plugin>>,
+    pub(crate) tools: Vec<Box<dyn DynTool>>,
 }
 
 impl<P: Inference> Agent for Harness<P> {

@@ -6,7 +6,7 @@ pub mod tui;
 pub mod ui;
 
 use futures_util::Stream;
-use harness::plugin::Plugin;
+use harness::tool::{DynTool, Tool};
 use harness::{Event, Harness};
 use inference::Inference;
 use ui::Ui;
@@ -22,27 +22,27 @@ pub trait Agent {
 pub fn builder() -> AgentBuilder {
     AgentBuilder {
         inference: (),
-        plugins: Vec::new(),
+        tools: Vec::new(),
     }
 }
 
 pub struct AgentBuilder<I = ()> {
     inference: I,
-    plugins: Vec<Box<dyn Plugin>>,
+    tools: Vec<Box<dyn DynTool>>,
 }
 
 impl AgentBuilder {
     pub fn inference<I: Inference>(self, inference: I) -> AgentBuilder<I> {
         AgentBuilder {
             inference,
-            plugins: self.plugins,
+            tools: self.tools,
         }
     }
 }
 
 impl<I> AgentBuilder<I> {
-    pub fn plugin(mut self, plugin: impl Plugin + 'static) -> Self {
-        self.plugins.push(Box::new(plugin));
+    pub fn tool(mut self, tool: impl Tool) -> Self {
+        self.tools.push(Box::new(tool));
         self
     }
 }
@@ -51,7 +51,7 @@ impl<I: Inference> AgentBuilder<I> {
     pub fn build(self) -> impl Agent {
         Harness {
             inference: self.inference,
-            plugins: self.plugins,
+            tools: self.tools,
         }
     }
 }
