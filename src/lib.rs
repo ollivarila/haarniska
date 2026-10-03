@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use futures_util::Stream;
 use harness::hook::{DynHook, Hook};
 use harness::instructions::Instructions;
+use harness::skills::Skills;
 use harness::tool::{DynTool, Tool};
 use harness::{Event, Harness};
 use inference::Inference;
@@ -33,6 +34,7 @@ pub fn builder() -> AgentBuilder {
         hooks: Vec::new(),
         system_prompt: DEFAULT_SYSTEM_PROMPT.into(),
         instructions: Instructions::default(),
+        skills: Skills::default(),
         cwd: ".".into(),
     }
 }
@@ -43,6 +45,7 @@ pub struct AgentBuilder<I = ()> {
     hooks: Vec<Box<dyn DynHook>>,
     system_prompt: String,
     instructions: Instructions,
+    skills: Skills,
     cwd: PathBuf,
 }
 
@@ -54,6 +57,7 @@ impl AgentBuilder {
             hooks: self.hooks,
             system_prompt: self.system_prompt,
             instructions: self.instructions,
+            skills: self.skills,
             cwd: self.cwd,
         }
     }
@@ -92,6 +96,13 @@ impl<I> AgentBuilder<I> {
         self
     }
 
+    /// Lists these skills for the model, after the instructions, and adds
+    /// the tool that loads one. Replaces any passed before.
+    pub fn with_skills(mut self, skills: Skills) -> Self {
+        self.skills = skills;
+        self
+    }
+
     /// Where tools resolve relative paths. Defaults to the process's
     /// working directory.
     pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
@@ -101,8 +112,12 @@ impl<I> AgentBuilder<I> {
 }
 
 impl<I: Inference> AgentBuilder<I> {
-    pub fn build(self) -> impl Agent {
+    pub fn build(mut self) -> impl Agent {
         let system_prompt = self.instructions.append_to(self.system_prompt);
+        let system_prompt = self.skills.append_to(system_prompt);
+        if !self.skills.is_empty() {
+            self.tools.push(Box::new(self.skills.into_tool()));
+        }
         Harness::new(
             self.inference,
             self.tools,

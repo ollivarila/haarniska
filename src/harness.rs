@@ -2,6 +2,7 @@
 
 pub mod hook;
 pub mod instructions;
+pub mod skills;
 pub mod tool;
 
 use std::panic::AssertUnwindSafe;

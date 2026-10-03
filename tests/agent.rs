@@ -9,6 +9,7 @@ use haarniska::Agent;
 use haarniska::harness::Event;
 use haarniska::harness::hook::{Decision, Hook};
 use haarniska::harness::instructions::Instructions;
+use haarniska::harness::skills::{SkillProblem, Skills};
 use haarniska::harness::tool::{Tool, ToolCx, ToolError};
 use haarniska::inference::{
     Block, Chunk, Error, Inference, Message, Reply, Request, StopReason, ToolCall, ToolResult,
@@ -367,6 +368,176 @@ impl Hook for CrashAfter {
 }
 
 #[tokio::test]
+async fn skills_are_listed_after_the_system_prompt() {
+    let dir = TempDir::new().unwrap();
+    write_skill(
+        dir.path(),
+        "release",
+        "Steps for cutting a release.",
+        "Tag it.",
+    );
+    write_skill(
+        dir.path(),
+        "write-docs",
+        "Conventions for design docs.",
+        "Be brief.",
+    );
+    let (inference, requests) = ScriptedInference::new([text_reply("Hi.")]);
+    let mut agent = haarniska::builder()
+        .with_inference(inference)
+        .with_system_prompt("You are a coding agent.")
+        .with_skills(Skills::new().layer_dir(dir.path()).unwrap())
+        .build();
+
+    let _: Vec<Event> = agent.prompt("Hello").collect().await;
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests[0].system,
+        "You are a coding agent.\n\n\
+         Skills are available for the tasks below. \
+         Load one with the skill tool before doing a task it covers.\n\n\
+         - release: Steps for cutting a release.\n\
+         - write-docs: Conventions for design docs."
+    );
+    assert_eq!(requests[0].tools, ["skill"]);
+}
+
+#[tokio::test]
+async fn model_loads_a_skill_and_gets_its_instructions() {
+    let dir = TempDir::new().unwrap();
+    write_skill(
+        dir.path(),
+        "release",
+        "Steps for cutting a release.",
+        "Tag it.",
+    );
+    let (inference, _requests) = ScriptedInference::new([
+        tool_reply(tool_call("skill", json!({"name": "release"}))),
+        text_reply("Released."),
+    ]);
+    let mut agent = haarniska::builder()
+        .with_inference(inference)
+        .with_skills(Skills::new().layer_dir(dir.path()).unwrap())
+        .build();
+
+    let events: Vec<Event> = agent.prompt("Cut a release").collect().await;
+
+    let result = tool_result(&events);
+    assert!(!result.is_error);
+    assert_eq!(
+        result.output,
+        format!(
+            "Tag it.\n\nThis skill's files are in {}",
+            dir.path().join("release").display()
+        )
+    );
+}
+
+#[tokio::test]
+async fn unknown_skill_gives_the_model_the_names_that_exist() {
+    let dir = TempDir::new().unwrap();
+    write_skill(
+        dir.path(),
+        "release",
+        "Steps for cutting a release.",
+        "Tag it.",
+    );
+    let (inference, _requests) = ScriptedInference::new([
+        tool_reply(tool_call("skill", json!({"name": "deploy"}))),
+        text_reply("Sorry."),
+    ]);
+    let mut agent = haarniska::builder()
+        .with_inference(inference)
+        .with_skills(Skills::new().layer_dir(dir.path()).unwrap())
+        .build();
+
+    let events: Vec<Event> = agent.prompt("Deploy").collect().await;
+
+    let result = tool_result(&events);
+    assert!(result.is_error);
+    assert_eq!(
+        result.output,
+        "Error: no skill named `deploy`. Available: release"
+    );
+}
+
+#[tokio::test]
+async fn skill_in_a_later_layer_replaces_one_with_the_same_name() {
+    let user = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    write_skill(user.path(), "release", "The usual release.", "Tag it.");
+    write_skill(
+        project.path(),
+        "release",
+        "This project's release.",
+        "Ship it.",
+    );
+    let skills = Skills::new()
+        .layer_dir(user.path())
+        .unwrap()
+        .layer_dir(project.path())
+        .unwrap();
+    let (inference, requests) = ScriptedInference::new([text_reply("Hi.")]);
+    let mut agent = haarniska::builder()
+        .with_inference(inference)
+        .with_skills(skills)
+        .build();
+
+    let _: Vec<Event> = agent.prompt("Hello").collect().await;
+
+    let system = &requests.lock().unwrap()[0].system;
+    assert!(system.ends_with("\n- release: This project's release."));
+    assert!(!system.contains("The usual release."));
+}
+
+#[tokio::test]
+async fn broken_skill_is_skipped_and_reported() {
+    let dir = TempDir::new().unwrap();
+    write_skill(
+        dir.path(),
+        "release",
+        "Steps for cutting a release.",
+        "Tag it.",
+    );
+    std::fs::create_dir(dir.path().join("broken")).unwrap();
+    std::fs::write(dir.path().join("broken/SKILL.md"), "No header here.").unwrap();
+    std::fs::create_dir(dir.path().join("not-a-skill")).unwrap();
+
+    let skills = Skills::new().layer_dir(dir.path()).unwrap();
+
+    assert_eq!(
+        skills.problems(),
+        [SkillProblem {
+            path: dir.path().join("broken/SKILL.md"),
+            reason: "there is no header".into(),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn without_skills_there_is_no_listing_and_no_skill_tool() {
+    let empty = TempDir::new().unwrap();
+    let skills = Skills::new()
+        .layer_dir(empty.path())
+        .unwrap()
+        .layer_dir(empty.path().join("missing"))
+        .unwrap();
+    let (inference, requests) = ScriptedInference::new([text_reply("Hi.")]);
+    let mut agent = haarniska::builder()
+        .with_inference(inference)
+        .with_system_prompt("You are a coding agent.")
+        .with_skills(skills)
+        .build();
+
+    let _: Vec<Event> = agent.prompt("Hello").collect().await;
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests[0].system, "You are a coding agent.");
+    assert!(requests[0].tools.is_empty());
+}
+
+#[tokio::test]
 async fn instructions_follow_the_system_prompt() {
     let project = TempDir::new().unwrap();
     let file = project.path().join("AGENTS.md");
@@ -590,6 +761,7 @@ type Requests = Arc<Mutex<Vec<Seen>>>;
 struct Seen {
     system: String,
     messages: Vec<Message>,
+    tools: Vec<String>,
 }
 
 impl ScriptedInference {
@@ -608,6 +780,7 @@ impl Inference for ScriptedInference {
         self.requests.lock().unwrap().push(Seen {
             system: request.system.to_owned(),
             messages: request.messages.to_vec(),
+            tools: request.tools.iter().map(|tool| tool.name.clone()).collect(),
         });
         let reply = self.replies.lock().unwrap().pop_front();
 
@@ -679,4 +852,12 @@ async fn system_prompt_with(instructions: Instructions) -> String {
     let _: Vec<Event> = agent.prompt("Hello").collect().await;
 
     requests.lock().unwrap()[0].system.clone()
+}
+
+/// Writes the skill `name` into the skills directory `dir`.
+fn write_skill(dir: &std::path::Path, name: &str, description: &str, body: &str) {
+    let folder = dir.join(name);
+    std::fs::create_dir(&folder).unwrap();
+    let text = format!("---\nname: {name}\ndescription: {description}\n---\n\n{body}\n");
+    std::fs::write(folder.join("SKILL.md"), text).unwrap();
 }
