@@ -12,6 +12,7 @@ use haarniska::inference::{
     Block, Chunk, Error, Inference, Message, Reply, Request, StopReason, ToolCall, ToolResult,
     Usage,
 };
+use haarniska::ui::{Input, Ui};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
@@ -187,6 +188,115 @@ async fn next_prompt_continues_the_conversation() {
             Message::User("How are you?".into()),
         ]
     );
+}
+
+#[tokio::test]
+async fn session_runs_each_prompt_and_shows_its_events() {
+    let (inference, requests) = ScriptedInference::new([text_reply("Hi."), text_reply("Fine.")]);
+    let (ui, shown) = ScriptedUi::new(["Hello", "How are you?"]);
+    let agent = haarniska::builder().with_inference(inference).build();
+
+    agent.run(ui).await;
+
+    assert_eq!(
+        *shown.lock().unwrap(),
+        [
+            Event::Text("Hi.".into()),
+            done(),
+            Event::Text("Fine.".into()),
+            done(),
+        ]
+    );
+    assert_eq!(requests.lock().unwrap()[1].len(), 3);
+}
+
+#[tokio::test]
+async fn cancel_stops_the_running_turn_and_the_session_goes_on() {
+    let call = tool_call("hang", json!({}));
+    let (inference, _requests) =
+        ScriptedInference::new([tool_reply(call.clone()), text_reply("Hi.")]);
+    let (mut ui, shown) = ScriptedUi::new(["Hang", "Hello"]);
+    ui.cancel_when_a_tool_starts = true;
+    let agent = haarniska::builder()
+        .with_inference(inference)
+        .with_tool(Hang)
+        .build();
+
+    agent.run(ui).await;
+
+    assert_eq!(
+        *shown.lock().unwrap(),
+        [Event::ToolStarted(call), Event::Text("Hi.".into()), done()]
+    );
+}
+
+/// A [`Ui`] that sends `prompts` one per turn, then quits, and records
+/// every event it is shown.
+struct ScriptedUi {
+    prompts: VecDeque<String>,
+    shown: Shown,
+    turn_running: bool,
+    cancel_when_a_tool_starts: bool,
+    cancel_now: bool,
+}
+
+type Shown = Arc<Mutex<Vec<Event>>>;
+
+impl ScriptedUi {
+    fn new<const N: usize>(prompts: [&str; N]) -> (Self, Shown) {
+        let shown = Shown::default();
+        let ui = Self {
+            prompts: prompts.into_iter().map(String::from).collect(),
+            shown: shown.clone(),
+            turn_running: false,
+            cancel_when_a_tool_starts: false,
+            cancel_now: false,
+        };
+        (ui, shown)
+    }
+}
+
+impl Ui for ScriptedUi {
+    async fn next(&mut self) -> Input {
+        if self.cancel_now {
+            self.cancel_now = false;
+            self.turn_running = false;
+            return Input::Cancel;
+        }
+        if self.turn_running {
+            return std::future::pending().await;
+        }
+        match self.prompts.pop_front() {
+            Some(prompt) => {
+                self.turn_running = true;
+                Input::Prompt(prompt)
+            }
+            None => Input::Quit,
+        }
+    }
+
+    fn show(&mut self, event: Event) {
+        match event {
+            Event::Done { .. } | Event::Failed(_) => self.turn_running = false,
+            Event::ToolStarted(_) => self.cancel_now = self.cancel_when_a_tool_starts,
+            _ => {}
+        }
+        self.shown.lock().unwrap().push(event);
+    }
+}
+
+/// A tool that never finishes.
+struct Hang;
+
+impl Tool for Hang {
+    type Input = NoInput;
+
+    const NAME: &str = "hang";
+    const DESCRIPTION: &str = "Never finishes.";
+
+    async fn call(&self, _cx: &ToolCx, _input: NoInput) -> Result<String, ToolError> {
+        std::future::pending().await
+    }
 }
 
 /// A tool that always panics.

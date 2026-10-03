@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::pin::pin;
 
 use async_stream::stream;
+use futures_util::future::{Either, select};
 use futures_util::{FutureExt, Stream, StreamExt};
 
 use crate::Agent;
@@ -14,7 +15,7 @@ use crate::inference::{
     Block, Chunk, Error, Inference, Message, Request, StopReason, ToolCall, ToolResult, ToolSpec,
     Usage,
 };
-use crate::ui::Ui;
+use crate::ui::{Input, Ui};
 use tool::{DynTool, ToolCx, ToolError};
 
 /// What happens during a turn, in order.
@@ -99,8 +100,35 @@ impl<I: Inference> Agent for Harness<I> {
         }
     }
 
-    async fn run(self, _ui: impl Ui) {
-        todo!()
+    async fn run(mut self, mut ui: impl Ui) {
+        loop {
+            let text = match ui.next().await {
+                Input::Prompt(text) => text,
+                Input::Cancel => continue,
+                Input::Quit => return,
+            };
+
+            let mut events = pin!(self.prompt(&text));
+            loop {
+                // Scoped so the wait for input is dropped before `ui` is
+                // used again.
+                let step = {
+                    let input = pin!(ui.next());
+                    match select(events.next(), input).await {
+                        Either::Left((event, _)) => Either::Left(event),
+                        Either::Right((input, _)) => Either::Right(input),
+                    }
+                };
+                match step {
+                    Either::Left(Some(event)) => ui.show(event),
+                    Either::Left(None) => break,
+                    // Dropping `events` cancels the turn.
+                    Either::Right(Input::Cancel) => break,
+                    Either::Right(Input::Quit) => return,
+                    Either::Right(Input::Prompt(_)) => {}
+                }
+            }
+        }
     }
 }
 
