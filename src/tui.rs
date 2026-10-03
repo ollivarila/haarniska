@@ -15,11 +15,13 @@ use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::oneshot;
 
 use crate::harness::Event;
+use crate::harness::hook::{Answer, ApprovalRequest, Approver};
 use crate::inference::StopReason;
 use crate::ui::{Input, Ui};
 
@@ -30,11 +32,15 @@ const TICK: Duration = Duration::from_millis(50);
 const RESULT_LINES: usize = 8;
 /// Lines the transcript moves per notch of the mouse wheel.
 const WHEEL_LINES: usize = 3;
+/// Shown before the text being typed.
+const INPUT_MARKER: &str = "> ";
+/// Lines of a consent question shown at once.
+const QUESTION_LINES: usize = 6;
 
 /// A full-screen terminal UI. Keys are read and the screen is drawn on its
 /// own thread, so a tool that blocks cannot freeze it.
 pub struct Tui {
-    events: Option<mpsc::Sender<Event>>,
+    messages: mpsc::Sender<Message>,
     inputs: UnboundedReceiver<Input>,
     render_thread: Option<JoinHandle<()>>,
     hook: Arc<PanicHookState>,
@@ -48,22 +54,30 @@ impl Tui {
         // Needed to see the mouse wheel.
         execute!(io::stdout(), EnableMouseCapture)?;
         let hook = install_panic_hook();
-        let (events_tx, events_rx) = mpsc::channel();
+        let (messages_tx, messages_rx) = mpsc::channel();
         let (inputs_tx, inputs_rx) = unbounded_channel();
 
         let render_thread = thread::Builder::new()
             .name(RENDER_THREAD.into())
             .spawn(move || {
-                render(terminal, App::new(started), events_rx, inputs_tx);
+                render(terminal, App::new(started), messages_rx, inputs_tx);
                 restore();
             })?;
 
         Ok(Self {
-            events: Some(events_tx),
+            messages: messages_tx,
             inputs: inputs_rx,
             render_thread: Some(render_thread),
             hook,
         })
+    }
+
+    /// Asks the user, on this UI, when a hook wants their consent. Pass it
+    /// to the agent builder.
+    pub fn approver(&self) -> TuiApprover {
+        TuiApprover {
+            messages: self.messages.clone(),
+        }
     }
 }
 
@@ -74,17 +88,14 @@ impl Ui for Tui {
     }
 
     fn show(&mut self, event: Event) {
-        if let Some(events) = &self.events {
-            let _ = events.send(event);
-        }
+        let _ = self.messages.send(Message::Event(event));
     }
 }
 
 impl Drop for Tui {
     fn drop(&mut self) {
-        // Closing the channel tells the render thread to stop; it restores
-        // the terminal on its way out.
-        self.events = None;
+        // The render thread restores the terminal on its way out.
+        let _ = self.messages.send(Message::Stop);
         if let Some(render_thread) = self.render_thread.take() {
             let _ = render_thread.join();
         }
@@ -96,6 +107,36 @@ impl Drop for Tui {
             eprintln!("{message}");
         }
     }
+}
+
+/// Puts consent questions to the user of a [`Tui`].
+#[derive(Clone)]
+pub struct TuiApprover {
+    messages: mpsc::Sender<Message>,
+}
+
+impl Approver for TuiApprover {
+    async fn approve(&self, request: ApprovalRequest) -> Answer {
+        let (answer, answered) = oneshot::channel();
+        let _ = self
+            .messages
+            .send(Message::Question(Question { request, answer }));
+        // No answer means the UI is gone.
+        answered.await.unwrap_or(Answer::Deny)
+    }
+}
+
+/// What the render thread is told.
+enum Message {
+    Event(Event),
+    Question(Question),
+    Stop,
+}
+
+/// A consent question waiting for a key.
+struct Question {
+    request: ApprovalRequest,
+    answer: oneshot::Sender<Answer>,
 }
 
 struct PanicHookState {
@@ -142,17 +183,20 @@ fn restore() {
 fn render(
     mut terminal: DefaultTerminal,
     mut app: App,
-    events: mpsc::Receiver<Event>,
+    messages: mpsc::Receiver<Message>,
     inputs: UnboundedSender<Input>,
 ) {
     loop {
         loop {
-            match events.try_recv() {
-                Ok(event) => app.apply(event),
+            match messages.try_recv() {
+                Ok(Message::Event(event)) => app.apply(event),
+                Ok(Message::Question(question)) => app.question = Some(question),
+                Ok(Message::Stop) | Err(mpsc::TryRecvError::Disconnected) => return,
                 Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => return,
             }
         }
+        // A question nobody waits for any more, as after a cancelled turn.
+        app.question.take_if(|question| question.answer.is_closed());
 
         if terminal.draw(|frame| app.draw(frame)).is_err() {
             return;
@@ -196,6 +240,8 @@ struct App {
     /// end of the transcript.
     page: usize,
     max_top: usize,
+    /// Shown in place of the input line until answered.
+    question: Option<Question>,
 }
 
 struct Entry {
@@ -225,6 +271,7 @@ impl App {
             top: None,
             page: 1,
             max_top: 0,
+            question: None,
         }
     }
 
@@ -268,8 +315,17 @@ impl App {
             KeyCode::Char('c' | 'd') if ctrl => Some(Input::Quit),
             KeyCode::Esc if self.turn_running => {
                 self.turn_running = false;
+                self.question = None;
                 self.push(EntryKind::Note, "(cancelled)".into());
                 Some(Input::Cancel)
+            }
+            KeyCode::Char('y') if self.question.is_some() => self.answer(Answer::Allow),
+            KeyCode::Char('n') if self.question.is_some() => self.answer(Answer::Deny),
+            KeyCode::Char('a') if self.question.is_some() => self.answer(Answer::AllowAlways),
+            // Nothing is typed while a question is open.
+            // Nor is Enter an answer: it is too easy to press out of habit.
+            KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Enter if self.question.is_some() => {
+                None
             }
             KeyCode::Enter if !self.turn_running && !self.input.trim().is_empty() => {
                 let prompt = std::mem::take(&mut self.input);
@@ -302,6 +358,13 @@ impl App {
         }
     }
 
+    fn answer(&mut self, answer: Answer) -> Option<Input> {
+        if let Some(question) = self.question.take() {
+            let _ = question.answer.send(answer);
+        }
+        None
+    }
+
     fn mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::ScrollUp => self.scroll_up(WHEEL_LINES),
@@ -325,48 +388,90 @@ impl App {
 
     fn draw(&mut self, frame: &mut Frame) {
         let startup = *self.startup.get_or_insert_with(|| self.started.elapsed());
+        let question = self.question.as_ref().map(|question| &question.request);
+        let question_lines = question.map(|request| question_lines(request, frame.area().width));
+        let input_height = question_lines.as_ref().map_or(1, Vec::len) as u16 + 2;
         let [transcript_area, input_area, status_area] = Layout::vertical([
             Constraint::Min(1),
-            Constraint::Length(3),
+            Constraint::Length(input_height),
             Constraint::Length(1),
         ])
         .areas(frame.area());
 
         // One screen of the transcript: from `top` when scrolled back,
         // otherwise the newest lines, so it follows the reply.
-        let lines = self.lines(transcript_area.width as usize);
+        let padding = Padding::left(1);
+        let lines = self.lines(transcript_area.width.saturating_sub(padding.left) as usize);
         self.page = (transcript_area.height as usize).max(1);
         self.max_top = lines.len().saturating_sub(self.page);
         self.top = self.top.filter(|top| *top < self.max_top);
         let top = self.top.unwrap_or(self.max_top);
         let visible: Vec<_> = lines.into_iter().skip(top).take(self.page).collect();
-        frame.render_widget(Paragraph::new(visible), transcript_area);
+        let block = Block::new().padding(padding);
+        frame.render_widget(Paragraph::new(visible).block(block), transcript_area);
 
-        // The end of the input that fits, so the cursor stays visible.
-        let width = input_area.width.saturating_sub(2) as usize;
-        let hidden = self.input.chars().count().saturating_sub(width);
-        let visible: String = self.input.chars().skip(hidden).collect();
-        let cursor_x = input_area.x + 1 + visible.chars().count() as u16;
-        frame.render_widget(Paragraph::new(visible).block(Block::bordered()), input_area);
-        frame.set_cursor_position((cursor_x, input_area.y + 1));
-
-        let state = if self.turn_running {
-            "working"
+        if let (Some(request), Some(lines)) = (question, question_lines) {
+            let tool = request.tool.as_str();
+            let keys = Line::from(vec![
+                " ".into(),
+                "y".green().bold(),
+                " allow, ".into(),
+                "n".red().bold(),
+                " deny, ".into(),
+                "a".cyan().bold(),
+                format!(" always allow {tool} ").into(),
+            ]);
+            let block = Block::new()
+                .borders(Borders::TOP | Borders::BOTTOM)
+                .border_style(Style::new().fg(Color::Yellow))
+                .title(format!(" Allow {tool}? ").yellow().bold())
+                .title_bottom(keys);
+            frame.render_widget(Paragraph::new(lines).block(block), input_area);
         } else {
-            "ready"
+            // The end of the input that fits, so the cursor stays visible.
+            // One column is kept free for the cursor.
+            let marker_width = INPUT_MARKER.chars().count() as u16;
+            let width = input_area.width.saturating_sub(marker_width + 1) as usize;
+            let hidden = self.input.chars().count().saturating_sub(width);
+            let visible: String = self.input.chars().skip(hidden).collect();
+            let cursor_x = input_area.x + marker_width + visible.chars().count() as u16;
+            let line = Line::from(vec![INPUT_MARKER.cyan().bold(), visible.into()]);
+            let block = Block::new()
+                .borders(Borders::TOP | Borders::BOTTOM)
+                .border_style(Style::new().fg(Color::DarkGray));
+            frame.render_widget(Paragraph::new(line).block(block), input_area);
+            frame.set_cursor_position((cursor_x, input_area.y + 1));
+        }
+
+        let state = if self.question.is_some() {
+            "waiting for you".magenta().bold()
+        } else if self.turn_running {
+            "working".yellow().bold()
+        } else {
+            "ready".green().bold()
         };
         let keys = if self.top.is_some() {
-            "scrolled back, End to follow"
+            "scrolled back, End to follow".yellow()
         } else {
-            "Enter send, Esc cancel, PgUp/PgDn or wheel scroll, Ctrl-C quit"
+            "Enter send, Esc cancel, PgUp/PgDn or wheel scroll, Ctrl-C quit".dim()
         };
-        let status = format!(
-            " {state} | startup {} ms | tokens {} in, {} out | {keys}",
-            startup.as_millis(),
-            self.input_tokens,
-            self.output_tokens,
-        );
-        frame.render_widget(Paragraph::new(status).dim(), status_area);
+        let separator = || " | ".dim();
+        let status = Line::from(vec![
+            " ".into(),
+            state,
+            separator(),
+            "startup ".dim(),
+            format!("{} ms", startup.as_millis()).cyan(),
+            separator(),
+            "tokens ".dim(),
+            self.input_tokens.to_string().cyan(),
+            " in, ".dim(),
+            self.output_tokens.to_string().cyan(),
+            " out".dim(),
+            separator(),
+            keys,
+        ]);
+        frame.render_widget(Paragraph::new(status), status_area);
     }
 
     /// The transcript as screen lines, wrapped to `width`.
@@ -380,14 +485,8 @@ impl App {
                 EntryKind::Error => ("  ", Style::new().fg(Color::Red)),
                 EntryKind::Note => ("  ", Style::new().dim()),
             };
-            for line in format!("{prefix}{}", entry.text).lines() {
-                let chars: Vec<char> = line.chars().collect();
-                if chars.is_empty() {
-                    lines.push(Line::default());
-                }
-                for row in chars.chunks(width.max(1)) {
-                    lines.push(Line::styled(row.iter().collect::<String>(), style));
-                }
+            for row in wrap(&format!("{prefix}{}", entry.text), width) {
+                lines.push(Line::styled(row, style));
             }
             lines.push(Line::default());
         }
@@ -397,6 +496,52 @@ impl App {
     fn push(&mut self, kind: EntryKind, text: String) {
         self.transcript.push(Entry { kind, text });
     }
+}
+
+/// What a consent question shows between its lines: the call, then each reason.
+fn question_lines(request: &ApprovalRequest, screen_width: u16) -> Vec<Line<'static>> {
+    let width = screen_width as usize;
+    // A lone text field, like a shell command, reads better bare.
+    let input = match request.input.as_object().map(|fields| fields.values()) {
+        Some(mut values) if values.len() == 1 => match values.next() {
+            Some(serde_json::Value::String(text)) => text.clone(),
+            _ => request.input.to_string(),
+        },
+        _ => request.input.to_string(),
+    };
+
+    let mut lines: Vec<_> = wrap(&input, width)
+        .into_iter()
+        .map(|row| Line::from(row).bold())
+        .collect();
+    for reason in &request.reasons {
+        lines.extend(
+            wrap(reason, width)
+                .into_iter()
+                .map(|row| Line::from(row).dim()),
+        );
+    }
+    if lines.len() > QUESTION_LINES {
+        lines.truncate(QUESTION_LINES - 1);
+        lines.push(Line::from("...").dim());
+    }
+    lines
+}
+
+/// `text` as screen rows no wider than `width`. Counts characters, so wide
+/// ones may overflow.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let chars: Vec<char> = line.chars().collect();
+        if chars.is_empty() {
+            rows.push(String::new());
+        }
+        for row in chars.chunks(width.max(1)) {
+            rows.push(row.iter().collect());
+        }
+    }
+    rows
 }
 
 /// The first `count` lines of `text`, with a marker if more were left out.
@@ -433,13 +578,83 @@ mod tests {
         (0..5)
             .map(|y| {
                 let row: String = (0..60).map(|x| buffer[(x, y)].symbol()).collect();
-                row.trim_end().to_owned()
+                row.trim().to_owned()
             })
             .collect()
     }
 
     fn press(app: &mut App, code: KeyCode) {
         app.key(KeyEvent::from(code));
+    }
+
+    /// Opens a question about `git push`; the receiver gets the answer.
+    fn ask(app: &mut App) -> oneshot::Receiver<Answer> {
+        let (answer, answered) = oneshot::channel();
+        app.question = Some(Question {
+            request: ApprovalRequest {
+                tool: "shell".into(),
+                input: serde_json::json!({"command": "git push"}),
+                reasons: vec!["pushes to the remote".into()],
+            },
+            answer,
+        });
+        answered
+    }
+
+    #[test]
+    fn question_takes_the_place_of_the_input_line() {
+        let (mut app, mut terminal) = app_with_reply(1);
+        let _answered = ask(&mut app);
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (4..8)
+            .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect();
+        assert!(rows[0].contains(" Allow shell? "));
+        assert!(rows[1].contains("git push"));
+        assert!(rows[2].contains("pushes to the remote"));
+        assert!(rows[3].contains(" y allow, n deny, a always allow shell "));
+    }
+
+    #[test]
+    fn keys_answer_the_question() {
+        for (key, answer) in [
+            ('y', Answer::Allow),
+            ('n', Answer::Deny),
+            ('a', Answer::AllowAlways),
+        ] {
+            let mut app = App::new(Instant::now());
+            let mut answered = ask(&mut app);
+
+            press(&mut app, KeyCode::Char(key));
+
+            assert_eq!(answered.try_recv(), Ok(answer));
+            assert!(app.question.is_none());
+        }
+    }
+
+    #[test]
+    fn enter_does_not_answer_the_question() {
+        let mut app = App::new(Instant::now());
+        let mut answered = ask(&mut app);
+
+        press(&mut app, KeyCode::Enter);
+
+        assert!(answered.try_recv().is_err());
+        assert!(app.question.is_some());
+    }
+
+    #[test]
+    fn nothing_is_typed_while_a_question_is_open() {
+        let mut app = App::new(Instant::now());
+        let mut answered = ask(&mut app);
+
+        press(&mut app, KeyCode::Char('x'));
+
+        assert_eq!(app.input, "");
+        assert!(answered.try_recv().is_err());
     }
 
     #[test]

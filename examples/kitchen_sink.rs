@@ -3,6 +3,7 @@
 use std::time::Instant;
 
 use haarniska::Agent;
+use haarniska::harness::hook::AskBefore;
 use haarniska::harness::instructions::Instructions;
 use haarniska::harness::skills::Skills;
 use haarniska::inference::anthropic::{AnthropicInference, model};
@@ -19,13 +20,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer_dir(home.join(".claude/skills"))?
         .layer_dir(".claude/skills")?;
 
+    let tui = Tui::new(started)?;
     let agent = haarniska::builder()
         .with_inference(AnthropicInference::new(model::CLAUDE_HAIKU_4_5)?)
         .with_default_tools()
         .with_instructions(Instructions::new().layer_dir(".")?)
         .with_skills(skills)
+        // Reading is free; anything that changes or runs something is asked
+        // about first.
+        .with_hook(AskBefore::tools(["shell", "write", "edit"]))
+        .with_approver(tui.approver())
         .build();
 
-    agent.run(Tui::new(started)?).await;
+    agent.run(tui).await;
     Ok(())
 }
