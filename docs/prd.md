@@ -24,9 +24,9 @@ binary as is.
 - Built-in tools - read, write, and edit files; run shell commands.
 - Providers - talk to model APIs through one provider interface.
 - Terminal UI - interactive prompt, streamed replies, tool calls and
-  results, slash commands.
-- Plugins - add tools and slash commands, and hook into the agent loop
-  to block, change, or observe what happens.
+  results.
+- Plugins - add tools, and hook into the agent loop to block, change, or
+  observe what happens.
 
 ## 3. Architectural characteristics
 
@@ -34,7 +34,7 @@ binary as is.
   excluding network. Cost does not grow with plugin count.
 - **Runtime performance** — harness work per turn is negligible next to model
   latency.
-- **Extensibility** — tools, commands, hooks, providers, and UI can all be
+- **Extensibility** — tools, hooks, providers, and UI can all be
   added or replaced. Built-in features use the same public API as plugins.
 - **Simplicity** — a small core API; a new tool plugin takes under 50 lines.
 - **Stability** — API changes follow semver and rarely break plugins.
@@ -45,6 +45,7 @@ binary as is.
 
 Not in v1:
 
+- Slash commands
 - Installing or reloading plugins at runtime
 - Plugins written in other languages, including pi extensions
 - A permission sandbox (run the process in a container instead)
