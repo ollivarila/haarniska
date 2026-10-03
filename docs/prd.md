@@ -6,16 +6,14 @@
 ## 1. Overview
 
 A coding agent harness in Rust, shipped as a library. Users build their own
-agent by combining the core with plugins, which are plain Rust crates. A
-default binary serves users who do not want to customize.
+agent by combining the core with plugins, which are plain Rust crates.
 
 Existing extensible harnesses (for example pi, in TypeScript) start slowly, and
 each third-party extension makes startup slower. This project keeps the
 flexibility while making startup cost independent of how many plugins are used.
 
-Primary users are experienced developers who want to shape their agent
-precisely and are comfortable writing Rust. Secondary users run the default
-binary as is.
+Users are experienced developers who want to shape their agent precisely and
+are comfortable writing Rust.
 
 ## 2. Functional requirements
 
@@ -24,9 +22,12 @@ binary as is.
 - Built-in tools - read, write, and edit files; run shell commands.
 - Providers - talk to model APIs through one provider interface.
 - Terminal UI - interactive prompt, streamed replies, tool calls and
-  results.
+  results, scrolling back through the session.
 - Plugins - add tools, and hook into the agent loop to block, change, or
   observe what happens.
+- Project instructions - read `AGENTS.md` from the project and follow it.
+- Skills - find the skills available to the project, tell the model what
+  each is for, and load one when the task calls for it.
 
 ## 3. Architectural characteristics
 
@@ -45,6 +46,9 @@ binary as is.
 
 Not in v1:
 
+- A default binary (an example shows a full setup instead)
+- `AGENTS.md` files outside the project root (parent, nested, or user-wide);
+  planned next, so the design must leave room for them
 - Slash commands
 - Installing or reloading plugins at runtime
 - Plugins written in other languages, including pi extensions
@@ -69,9 +73,29 @@ Not in v1:
 4. As a developer with many plugins, I want startup to stay instant,
    so that plugins never make the tool slower to open.
 
+5. As a developer, I want the agent to follow my project's `AGENTS.md`, so
+   that I do not repeat its rules in every prompt.
+
+6. As a developer, I want the agent to use my skills, so that it handles
+   recurring tasks the way I have written down.
+
+7. As a developer, I want to hook into the agent loop, so that I can
+   block, change, or record what the agent does, such as refusing a
+   dangerous shell command.
+
+8. As a developer, I want to scroll back through the session, so that I can
+   read a long reply or an earlier tool result.
+
 ## 7. Acceptance criteria
 
 - One can run example agent setup and perform simple actions using API key only.
 - Custom plugins can be added to the harness.
 - Misbehaving plugin does not crash the application.
 - Startup to prompt is under 50 ms. Startup time displayable in UI.
+- A rule in the project's `AGENTS.md` changes what the agent does.
+- A skill is used when a prompt matches it, and not loaded otherwise.
+- A hook can stop a tool call before it runs, and the model is told why.
+- A hook can change a tool call's input or result.
+- A failing hook does not end the session.
+- Earlier output can be scrolled back to, also while a turn is running, and
+  the view returns to following new output.
