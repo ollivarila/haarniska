@@ -9,7 +9,7 @@ pub mod ui;
 use std::path::PathBuf;
 
 use futures_util::Stream;
-use harness::hook::{DynHook, Hook};
+use harness::hook::{Approver, DynApprover, DynHook, Hook};
 use harness::instructions::Instructions;
 use harness::skills::Skills;
 use harness::tool::{DynTool, Tool};
@@ -32,6 +32,7 @@ pub fn builder() -> AgentBuilder {
         inference: (),
         tools: Vec::new(),
         hooks: Vec::new(),
+        approver: None,
         system_prompt: DEFAULT_SYSTEM_PROMPT.into(),
         instructions: Instructions::default(),
         skills: Skills::default(),
@@ -43,6 +44,7 @@ pub struct AgentBuilder<I = ()> {
     inference: I,
     tools: Vec<Box<dyn DynTool>>,
     hooks: Vec<Box<dyn DynHook>>,
+    approver: Option<Box<dyn DynApprover>>,
     system_prompt: String,
     instructions: Instructions,
     skills: Skills,
@@ -55,6 +57,7 @@ impl AgentBuilder {
             inference,
             tools: self.tools,
             hooks: self.hooks,
+            approver: self.approver,
             system_prompt: self.system_prompt,
             instructions: self.instructions,
             skills: self.skills,
@@ -80,6 +83,13 @@ impl<I> AgentBuilder<I> {
     /// Adds a hook. Hooks run around every tool call, in the order added.
     pub fn with_hook(mut self, hook: impl Hook) -> Self {
         self.hooks.push(Box::new(hook));
+        self
+    }
+
+    /// Who to ask when a hook wants the user's consent. Without one, such a
+    /// call is blocked.
+    pub fn with_approver(mut self, approver: impl Approver) -> Self {
+        self.approver = Some(Box::new(approver));
         self
     }
 
@@ -122,6 +132,7 @@ impl<I: Inference> AgentBuilder<I> {
             self.inference,
             self.tools,
             self.hooks,
+            self.approver,
             system_prompt,
             self.cwd,
         )

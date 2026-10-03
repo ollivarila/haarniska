@@ -59,6 +59,56 @@ pub enum Decision {
     Continue,
     /// Stop the call, for this reason.
     Block(String),
+    /// Run the call only if the user agrees. The reason is shown to them.
+    Ask(String),
+}
+
+/// Asks before the tools it was given. A starting point for a consent
+/// policy; write a [`Hook`] for anything finer.
+pub struct AskBefore {
+    tools: Vec<String>,
+}
+
+impl AskBefore {
+    pub fn tools<T: Into<String>>(tools: impl IntoIterator<Item = T>) -> Self {
+        Self {
+            tools: tools.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl Hook for AskBefore {
+    async fn before_tool(&self, _cx: &ToolCx, tool: &str, _input: &mut Value) -> Decision {
+        if self.tools.iter().any(|name| name == tool) {
+            Decision::Ask(format!("{tool} needs your consent"))
+        } else {
+            Decision::Continue
+        }
+    }
+}
+
+/// Puts a question from a hook to the user. A UI provides one.
+pub trait Approver: Send + Sync + 'static {
+    fn approve(&self, request: ApprovalRequest) -> impl Future<Output = Answer> + Send;
+}
+
+/// A tool call waiting for the user's consent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApprovalRequest {
+    pub tool: String,
+    /// As the tool will get it, after every hook's changes.
+    pub input: Value,
+    /// Why each hook that asked did so.
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Answer {
+    Allow,
+    /// Allow, and do not ask about this tool again in this session.
+    AllowAlways,
+    Deny,
 }
 
 /// A [`Hook`] usable as a trait object, so hooks of different types can sit
@@ -68,6 +118,19 @@ pub(crate) trait DynHook: Send + Sync {
     async fn before_tool(&self, cx: &ToolCx, tool: &str, input: &mut Value) -> Decision;
 
     async fn after_tool(&self, cx: &ToolCx, call: &ToolCall, result: &mut ToolResult);
+}
+
+/// An [`Approver`] usable as a trait object.
+#[async_trait]
+pub(crate) trait DynApprover: Send + Sync {
+    async fn approve(&self, request: ApprovalRequest) -> Answer;
+}
+
+#[async_trait]
+impl<A: Approver> DynApprover for A {
+    async fn approve(&self, request: ApprovalRequest) -> Answer {
+        Approver::approve(self, request).await
+    }
 }
 
 #[async_trait]

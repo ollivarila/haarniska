@@ -5,6 +5,7 @@ pub mod instructions;
 pub mod skills;
 pub mod tool;
 
+use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::pin::pin;
@@ -19,7 +20,7 @@ use crate::inference::{
     Usage,
 };
 use crate::ui::{Input, Ui};
-use hook::{Decision, DynHook};
+use hook::{Answer, ApprovalRequest, Decision, DynApprover, DynHook};
 use tool::{DynTool, ToolCx, ToolError};
 
 /// What happens during a turn, in order.
@@ -45,6 +46,9 @@ pub(crate) struct Harness<I> {
     tools: Vec<Box<dyn DynTool>>,
     tool_specs: Vec<ToolSpec>,
     hooks: Vec<Box<dyn DynHook>>,
+    approver: Option<Box<dyn DynApprover>>,
+    /// Tools the user said to always allow, for this session.
+    always_allowed: HashSet<String>,
     tool_cx: ToolCx,
     system_prompt: String,
     messages: Vec<Message>,
@@ -148,6 +152,7 @@ impl<I> Harness<I> {
         inference: I,
         tools: Vec<Box<dyn DynTool>>,
         hooks: Vec<Box<dyn DynHook>>,
+        approver: Option<Box<dyn DynApprover>>,
         system_prompt: String,
         cwd: PathBuf,
     ) -> Self {
@@ -156,6 +161,8 @@ impl<I> Harness<I> {
             inference,
             tools,
             hooks,
+            approver,
+            always_allowed: HashSet::new(),
             tool_cx: ToolCx::new(cwd),
             system_prompt,
             messages: Vec::new(),
@@ -171,19 +178,39 @@ impl<I> Harness<I> {
         }
     }
 
-    /// Asks every hook, in order, whether `call` may run. Hooks may change
-    /// its input.
-    async fn before_tool(&self, call: &mut ToolCall) -> Result<(), CallError> {
+    /// Asks every hook, in order, whether `call` may run, and the user if a
+    /// hook wants their consent. Hooks may change its input.
+    async fn before_tool(&mut self, call: &mut ToolCall) -> Result<(), CallError> {
+        let mut reasons = Vec::new();
         for hook in &self.hooks {
             let decision = hook.before_tool(&self.tool_cx, &call.name, &mut call.input);
             match AssertUnwindSafe(decision).catch_unwind().await {
                 Ok(Decision::Continue) => {}
                 Ok(Decision::Block(reason)) => return Err(CallError::Blocked(reason)),
+                // Later hooks still run: one of them may block.
+                Ok(Decision::Ask(reason)) => reasons.push(reason),
                 // A guard that fails must not let the call through.
                 Err(_) => return Err(CallError::HookCrashed),
             }
         }
-        Ok(())
+
+        if reasons.is_empty() || self.always_allowed.contains(&call.name) {
+            return Ok(());
+        }
+        let approver = self.approver.as_ref().ok_or(CallError::NoApprover)?;
+        let answer = approver.approve(ApprovalRequest {
+            tool: call.name.clone(),
+            input: call.input.clone(),
+            reasons,
+        });
+        match AssertUnwindSafe(answer).catch_unwind().await {
+            Ok(Answer::Allow) => Ok(()),
+            Ok(Answer::AllowAlways) => {
+                self.always_allowed.insert(call.name.clone());
+                Ok(())
+            }
+            Ok(Answer::Deny) | Err(_) => Err(CallError::Declined),
+        }
     }
 
     /// Runs one tool call. A failure, also a crash, is returned as an error
@@ -229,6 +256,10 @@ enum CallError {
     Blocked(String),
     #[error("blocked: a hook crashed")]
     HookCrashed,
+    #[error("the user declined this call")]
+    Declined,
+    #[error("this call needs the user's consent, and there is no one to ask")]
+    NoApprover,
 }
 
 fn to_result(call: &ToolCall, outcome: Result<String, CallError>) -> ToolResult {

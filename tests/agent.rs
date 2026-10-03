@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use futures_util::{Stream, StreamExt, stream};
 use haarniska::Agent;
 use haarniska::harness::Event;
-use haarniska::harness::hook::{Decision, Hook};
+use haarniska::harness::hook::{Answer, ApprovalRequest, Approver, AskBefore, Decision, Hook};
 use haarniska::harness::instructions::Instructions;
 use haarniska::harness::skills::{SkillProblem, Skills};
 use haarniska::harness::tool::{Tool, ToolCx, ToolError};
@@ -317,6 +317,200 @@ async fn hook_crashing_after_a_call_leaves_the_result_alone() {
     assert!(!result.is_error);
     assert_eq!(result.output, "out-kept");
     assert_eq!(events.last(), Some(&done()));
+}
+
+#[tokio::test]
+async fn call_that_needs_consent_runs_when_the_user_allows_it() {
+    let sandbox = TempDir::new().unwrap();
+    let (approver, asked) = ScriptedApprover::new([Answer::Allow]);
+    let (inference, _requests) = ScriptedInference::new([
+        tool_reply(tool_call(
+            "write",
+            json!({"path": "a.txt", "content": "hi"}),
+        )),
+        text_reply("Written."),
+    ]);
+    let mut agent = haarniska::builder()
+        .with_inference(inference)
+        .with_default_tools()
+        .with_hook(AskBefore::tools(["write"]))
+        .with_approver(approver)
+        .with_cwd(sandbox.path())
+        .build();
+
+    let _: Vec<Event> = agent.prompt("Write a.txt").collect().await;
+
+    assert!(sandbox.path().join("a.txt").exists());
+    assert_eq!(
+        *asked.lock().unwrap(),
+        [ApprovalRequest {
+            tool: "write".into(),
+            input: json!({"path": "a.txt", "content": "hi"}),
+            reasons: vec!["write needs your consent".into()],
+        }]
+    );
+}
+
+#[tokio::test]
+async fn call_the_user_denies_does_not_run_and_the_model_is_told() {
+    let sandbox = TempDir::new().unwrap();
+    let (approver, _asked) = ScriptedApprover::new([Answer::Deny]);
+    let (inference, _requests) = ScriptedInference::new([
+        tool_reply(tool_call(
+            "write",
+            json!({"path": "a.txt", "content": "hi"}),
+        )),
+        text_reply("Understood."),
+    ]);
+    let mut agent = haarniska::builder()
+        .with_inference(inference)
+        .with_default_tools()
+        .with_hook(AskBefore::tools(["write"]))
+        .with_approver(approver)
+        .with_cwd(sandbox.path())
+        .build();
+
+    let events: Vec<Event> = agent.prompt("Write a.txt").collect().await;
+
+    let result = tool_result(&events);
+    assert!(result.is_error);
+    assert_eq!(result.output, "Error: the user declined this call");
+    assert!(!sandbox.path().join("a.txt").exists());
+    assert_eq!(events.last(), Some(&done()));
+}
+
+#[tokio::test]
+async fn call_that_needs_consent_is_blocked_when_there_is_no_one_to_ask() {
+    let sandbox = TempDir::new().unwrap();
+    let (inference, _requests) = ScriptedInference::new([
+        tool_reply(tool_call(
+            "write",
+            json!({"path": "a.txt", "content": "hi"}),
+        )),
+        text_reply("Understood."),
+    ]);
+    let mut agent = haarniska::builder()
+        .with_inference(inference)
+        .with_default_tools()
+        .with_hook(AskBefore::tools(["write"]))
+        .with_cwd(sandbox.path())
+        .build();
+
+    let events: Vec<Event> = agent.prompt("Write a.txt").collect().await;
+
+    assert_eq!(
+        tool_result(&events).output,
+        "Error: this call needs the user's consent, and there is no one to ask"
+    );
+    assert!(!sandbox.path().join("a.txt").exists());
+}
+
+#[tokio::test]
+async fn always_allow_stops_the_asking_for_that_tool() {
+    let sandbox = TempDir::new().unwrap();
+    let (approver, asked) = ScriptedApprover::new([Answer::AllowAlways]);
+    let (inference, _requests) = ScriptedInference::new([
+        tool_reply(tool_call(
+            "write",
+            json!({"path": "a.txt", "content": "one"}),
+        )),
+        tool_reply(tool_call(
+            "write",
+            json!({"path": "b.txt", "content": "two"}),
+        )),
+        text_reply("Written."),
+    ]);
+    let mut agent = haarniska::builder()
+        .with_inference(inference)
+        .with_default_tools()
+        .with_hook(AskBefore::tools(["write"]))
+        .with_approver(approver)
+        .with_cwd(sandbox.path())
+        .build();
+
+    let _: Vec<Event> = agent.prompt("Write both").collect().await;
+
+    assert!(sandbox.path().join("a.txt").exists());
+    assert!(sandbox.path().join("b.txt").exists());
+    assert_eq!(asked.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn tools_that_were_not_named_run_without_asking() {
+    let (approver, asked) = ScriptedApprover::new([]);
+    let (inference, _requests) = ScriptedInference::new([
+        tool_reply(tool_call("shell", json!({"command": "printf out"}))),
+        text_reply("Done."),
+    ]);
+    let mut agent = haarniska::builder()
+        .with_inference(inference)
+        .with_default_tools()
+        .with_hook(AskBefore::tools(["write"]))
+        .with_approver(approver)
+        .build();
+
+    let events: Vec<Event> = agent.prompt("Run it").collect().await;
+
+    assert_eq!(tool_result(&events).output, "out");
+    assert!(asked.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn block_from_a_later_hook_wins_and_the_user_is_not_asked() {
+    let (approver, asked) = ScriptedApprover::new([Answer::Allow]);
+    let (inference, _requests) = ScriptedInference::new([
+        tool_reply(tool_call(
+            "write",
+            json!({"path": "a.txt", "content": "hi"}),
+        )),
+        text_reply("Understood."),
+    ]);
+    let mut agent = haarniska::builder()
+        .with_inference(inference)
+        .with_default_tools()
+        .with_hook(AskBefore::tools(["write"]))
+        .with_hook(BlockWrites)
+        .with_approver(approver)
+        .build();
+
+    let events: Vec<Event> = agent.prompt("Write a.txt").collect().await;
+
+    assert_eq!(
+        tool_result(&events).output,
+        "Error: blocked by a hook: writing is not allowed"
+    );
+    assert!(asked.lock().unwrap().is_empty());
+}
+
+/// An [`Approver`] that gives `answers` in order, denies after that, and
+/// records what it was asked.
+struct ScriptedApprover {
+    answers: Mutex<VecDeque<Answer>>,
+    asked: Asked,
+}
+
+type Asked = Arc<Mutex<Vec<ApprovalRequest>>>;
+
+impl ScriptedApprover {
+    fn new(answers: impl IntoIterator<Item = Answer>) -> (Self, Asked) {
+        let asked = Asked::default();
+        let approver = Self {
+            answers: Mutex::new(answers.into_iter().collect()),
+            asked: asked.clone(),
+        };
+        (approver, asked)
+    }
+}
+
+impl Approver for ScriptedApprover {
+    async fn approve(&self, request: ApprovalRequest) -> Answer {
+        self.asked.lock().unwrap().push(request);
+        self.answers
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(Answer::Deny)
+    }
 }
 
 struct BlockWrites;
