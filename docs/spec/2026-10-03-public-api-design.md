@@ -57,9 +57,9 @@ the harness knows a UI only through the Ui interface.
 
 ```rust
 let agent = haarniska::builder()
-    .inference(inference)
-    .tool(tool_a)
-    .tool(tool_b)
+    .with_inference(inference)
+    .with_tool(tool_a)
+    .with_tool(tool_b)
     .build();
 ```
 

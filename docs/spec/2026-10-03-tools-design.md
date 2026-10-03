@@ -66,9 +66,9 @@ impl Tool for Read {
 
 ```rust
 let agent = haarniska::builder()
-    .inference(inference)
-    .tool(Read)
-    .tool(Shell::new())
+    .with_inference(inference)
+    .with_tool(Read)
+    .with_tool(Shell)
     .build();
 ```
 

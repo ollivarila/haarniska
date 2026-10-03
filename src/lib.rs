@@ -2,6 +2,7 @@
 
 pub mod harness;
 pub mod inference;
+pub mod tools;
 pub mod tui;
 pub mod ui;
 
@@ -32,7 +33,7 @@ pub struct AgentBuilder<I = ()> {
 }
 
 impl AgentBuilder {
-    pub fn inference<I: Inference>(self, inference: I) -> AgentBuilder<I> {
+    pub fn with_inference<I: Inference>(self, inference: I) -> AgentBuilder<I> {
         AgentBuilder {
             inference,
             tools: self.tools,
@@ -41,9 +42,17 @@ impl AgentBuilder {
 }
 
 impl<I> AgentBuilder<I> {
-    pub fn tool(mut self, tool: impl Tool) -> Self {
+    pub fn with_tool(mut self, tool: impl Tool) -> Self {
         self.tools.push(Box::new(tool));
         self
+    }
+
+    /// Adds the built-in tools: read, write, edit, shell.
+    pub fn with_default_tools(self) -> Self {
+        self.with_tool(tools::Read)
+            .with_tool(tools::Write)
+            .with_tool(tools::Edit)
+            .with_tool(tools::Shell)
     }
 }
 

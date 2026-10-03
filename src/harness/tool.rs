@@ -35,7 +35,7 @@ use crate::inference::ToolSpec;
 ///     }
 /// }
 ///
-/// let agent = haarniska::builder().tool(Read);
+/// let agent = haarniska::builder().with_tool(Read);
 /// ```
 pub trait Tool: Send + Sync + 'static {
     /// Parsed from the model's JSON before the tool runs. Its schema is what
