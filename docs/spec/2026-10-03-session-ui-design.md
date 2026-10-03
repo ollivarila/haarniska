@@ -96,7 +96,10 @@ harness                            render thread
   input line spans the window, between two horizontal rules.
 - **Transcript** — the user's prompts, the reply as it streams, each tool
   call with its result, failures.
-- **Status line** — startup time and token usage.
+- **Status line** — startup times and token usage.
+- **Two startup times** — to the first frame, when the user can start
+  typing, and to the agent being ready, when the harness first waits for
+  input. Both count from when the program started.
 - **Keys** — Enter sends the prompt, Esc cancels the running turn, Ctrl-C
   and Ctrl-D quit.
 - **Terminal state** — the screen is restored on quit and when the UI itself

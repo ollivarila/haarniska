@@ -42,13 +42,16 @@ const QUESTION_LINES: usize = 6;
 pub struct Tui {
     messages: mpsc::Sender<Message>,
     inputs: UnboundedReceiver<Input>,
+    /// When the program started, until the ready time has been reported.
+    started: Option<Instant>,
     render_thread: Option<JoinHandle<()>>,
     hook: Arc<PanicHookState>,
 }
 
 impl Tui {
-    /// Takes over the terminal. `started` is when the program started; the
-    /// time from then to the first frame is shown as the startup time.
+    /// Takes over the terminal. `started` is when the program started. Two
+    /// startup times are shown, both counted from then: to the first frame,
+    /// and to the agent being ready for input.
     pub fn new(started: Instant) -> io::Result<Self> {
         let terminal = ratatui::try_init()?;
         // Needed to see the mouse wheel.
@@ -67,6 +70,7 @@ impl Tui {
         Ok(Self {
             messages: messages_tx,
             inputs: inputs_rx,
+            started: Some(started),
             render_thread: Some(render_thread),
             hook,
         })
@@ -83,6 +87,10 @@ impl Tui {
 
 impl Ui for Tui {
     async fn next(&mut self) -> Input {
+        // The first time the harness waits for input, the agent is ready.
+        if let Some(started) = self.started.take() {
+            let _ = self.messages.send(Message::Ready(started.elapsed()));
+        }
         // A closed channel means the render thread is gone.
         self.inputs.recv().await.unwrap_or(Input::Quit)
     }
@@ -130,6 +138,8 @@ impl Approver for TuiApprover {
 enum Message {
     Event(Event),
     Question(Question),
+    /// The agent took this long to be ready for input.
+    Ready(Duration),
     Stop,
 }
 
@@ -191,6 +201,7 @@ fn render(
             match messages.try_recv() {
                 Ok(Message::Event(event)) => app.apply(event),
                 Ok(Message::Question(question)) => app.question = Some(question),
+                Ok(Message::Ready(after)) => app.ready = Some(after),
                 Ok(Message::Stop) | Err(mpsc::TryRecvError::Disconnected) => return,
                 Err(mpsc::TryRecvError::Empty) => break,
             }
@@ -232,7 +243,9 @@ struct App {
     input_tokens: u64,
     output_tokens: u64,
     started: Instant,
-    startup: Option<Duration>,
+    /// Time to the first frame, and to the agent being ready for input.
+    first_paint: Option<Duration>,
+    ready: Option<Duration>,
     /// The transcript line at the top of the screen, or `None` to follow
     /// the newest output.
     top: Option<usize>,
@@ -267,7 +280,8 @@ impl App {
             input_tokens: 0,
             output_tokens: 0,
             started,
-            startup: None,
+            first_paint: None,
+            ready: None,
             top: None,
             page: 1,
             max_top: 0,
@@ -387,7 +401,9 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
-        let startup = *self.startup.get_or_insert_with(|| self.started.elapsed());
+        let first_paint = *self
+            .first_paint
+            .get_or_insert_with(|| self.started.elapsed());
         let question = self.question.as_ref().map(|question| &question.request);
         let question_lines = question.map(|request| question_lines(request, frame.area().width));
         let input_height = question_lines.as_ref().map_or(1, Vec::len) as u16 + 2;
@@ -460,8 +476,13 @@ impl App {
             " ".into(),
             state,
             separator(),
-            "startup ".dim(),
-            format!("{} ms", startup.as_millis()).cyan(),
+            "paint ".dim(),
+            format!("{} ms", first_paint.as_millis()).cyan(),
+            ", ready ".dim(),
+            match self.ready {
+                Some(ready) => format!("{} ms", ready.as_millis()).cyan(),
+                None => "...".dim(),
+            },
             separator(),
             "tokens ".dim(),
             self.input_tokens.to_string().cyan(),
