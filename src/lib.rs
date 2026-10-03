@@ -1,46 +1,56 @@
 //! haarniska: library-first, extensible coding agent harness.
 
 pub mod harness;
-pub mod provider;
+pub mod inference;
 pub mod tui;
 pub mod ui;
 
-use harness::Event;
 use harness::plugin::Plugin;
-use provider::Provider;
+use harness::{Event, Harness};
+use inference::Inference;
 use ui::Ui;
 
-pub struct AgentBuilder {}
+pub trait Agent {
+    /// One turn of the agentic loop.
+    fn prompt(&mut self, text: &str) -> impl Iterator<Item = Event>;
 
-impl AgentBuilder {
-    pub fn provider(self, _provider: impl Provider) -> Self {
-        todo!()
-    }
+    /// Interactive session loop driving `ui`.
+    fn run(self, ui: impl Ui);
+}
 
-    pub fn plugin(self, _plugin: impl Plugin) -> Self {
-        todo!()
-    }
-
-    pub fn build(self) -> Agent {
-        todo!()
+pub fn builder() -> AgentBuilder {
+    AgentBuilder {
+        inference: (),
+        plugins: Vec::new(),
     }
 }
 
-/// A harness combined with a model provider.
-pub struct Agent {}
+pub struct AgentBuilder<I = ()> {
+    inference: I,
+    plugins: Vec<Box<dyn Plugin>>,
+}
 
-impl Agent {
-    pub fn builder() -> AgentBuilder {
-        AgentBuilder {}
+impl AgentBuilder {
+    pub fn inference<I: Inference>(self, inference: I) -> AgentBuilder<I> {
+        AgentBuilder {
+            inference,
+            plugins: self.plugins,
+        }
     }
+}
 
-    /// One turn of the agentic loop.
-    pub fn prompt(&mut self, _text: &str) -> impl Iterator<Item = Event> {
-        std::iter::empty()
+impl<I> AgentBuilder<I> {
+    pub fn plugin(mut self, plugin: impl Plugin + 'static) -> Self {
+        self.plugins.push(Box::new(plugin));
+        self
     }
+}
 
-    /// Interactive session loop driving `ui`.
-    pub fn run(self, _ui: impl Ui) {
-        todo!()
+impl<I: Inference> AgentBuilder<I> {
+    pub fn build(self) -> impl Agent {
+        Harness {
+            inference: self.inference,
+            plugins: self.plugins,
+        }
     }
 }
