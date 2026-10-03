@@ -1,5 +1,6 @@
 //! The harness: agent loop and everything around the model.
 
+pub mod instructions;
 pub mod tool;
 
 use std::panic::AssertUnwindSafe;

@@ -9,6 +9,7 @@ pub mod ui;
 use std::path::PathBuf;
 
 use futures_util::Stream;
+use harness::instructions::Instructions;
 use harness::tool::{DynTool, Tool};
 use harness::{Event, Harness};
 use inference::Inference;
@@ -29,6 +30,7 @@ pub fn builder() -> AgentBuilder {
         inference: (),
         tools: Vec::new(),
         system_prompt: DEFAULT_SYSTEM_PROMPT.into(),
+        instructions: Instructions::default(),
         cwd: ".".into(),
     }
 }
@@ -37,6 +39,7 @@ pub struct AgentBuilder<I = ()> {
     inference: I,
     tools: Vec<Box<dyn DynTool>>,
     system_prompt: String,
+    instructions: Instructions,
     cwd: PathBuf,
 }
 
@@ -46,6 +49,7 @@ impl AgentBuilder {
             inference,
             tools: self.tools,
             system_prompt: self.system_prompt,
+            instructions: self.instructions,
             cwd: self.cwd,
         }
     }
@@ -71,6 +75,13 @@ impl<I> AgentBuilder<I> {
         self
     }
 
+    /// Gives the model these instructions, after the system prompt. Replaces
+    /// any passed before.
+    pub fn with_instructions(mut self, instructions: Instructions) -> Self {
+        self.instructions = instructions;
+        self
+    }
+
     /// Where tools resolve relative paths. Defaults to the process's
     /// working directory.
     pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
@@ -81,6 +92,7 @@ impl<I> AgentBuilder<I> {
 
 impl<I: Inference> AgentBuilder<I> {
     pub fn build(self) -> impl Agent {
-        Harness::new(self.inference, self.tools, self.system_prompt, self.cwd)
+        let system_prompt = self.instructions.append_to(self.system_prompt);
+        Harness::new(self.inference, self.tools, system_prompt, self.cwd)
     }
 }

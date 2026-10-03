@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use futures_util::{Stream, StreamExt, stream};
 use haarniska::Agent;
 use haarniska::harness::Event;
+use haarniska::harness::instructions::Instructions;
 use haarniska::harness::tool::{Tool, ToolCx, ToolError};
 use haarniska::inference::{
     Block, Chunk, Error, Inference, Message, Reply, Request, StopReason, ToolCall, ToolResult,
@@ -75,7 +76,7 @@ async fn tool_call_runs_and_its_result_goes_back_to_the_model() {
     let written = std::fs::read_to_string(sandbox.path().join("a.txt")).unwrap();
     assert_eq!(written, "hi");
     assert_eq!(
-        requests.lock().unwrap()[1],
+        requests.lock().unwrap()[1].messages,
         [
             Message::User("Write a.txt".into()),
             Message::Assistant(vec![Block::ToolCall(call)]),
@@ -181,13 +182,98 @@ async fn next_prompt_continues_the_conversation() {
     let _: Vec<Event> = agent.prompt("How are you?").collect().await;
 
     assert_eq!(
-        requests.lock().unwrap()[1],
+        requests.lock().unwrap()[1].messages,
         [
             Message::User("Hello".into()),
             Message::Assistant(vec![Block::Text("Hi.".into())]),
             Message::User("How are you?".into()),
         ]
     );
+}
+
+#[tokio::test]
+async fn instructions_follow_the_system_prompt() {
+    let project = TempDir::new().unwrap();
+    let file = project.path().join("AGENTS.md");
+    std::fs::write(&file, "Always use tabs.\n").unwrap();
+
+    let instructions = Instructions::new().layer_dir(project.path()).unwrap();
+
+    assert_eq!(
+        system_prompt_with(instructions).await,
+        format!(
+            "You are a coding agent.\n\nInstructions from {}:\n\nAlways use tabs.",
+            file.display()
+        )
+    );
+}
+
+#[tokio::test]
+async fn directory_without_instructions_leaves_the_system_prompt_alone() {
+    let project = TempDir::new().unwrap();
+
+    let instructions = Instructions::new().layer_dir(project.path()).unwrap();
+
+    assert_eq!(
+        system_prompt_with(instructions).await,
+        "You are a coding agent."
+    );
+}
+
+#[tokio::test]
+async fn layers_are_given_in_order_with_the_conflict_rule() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let user_file = home.path().join("rules.md");
+    let project_file = project.path().join("AGENTS.md");
+    std::fs::write(&user_file, "Answer briefly.").unwrap();
+    std::fs::write(&project_file, "Always use tabs.").unwrap();
+
+    let instructions = Instructions::new()
+        .layer_file(&user_file)
+        .unwrap()
+        .layer_dir(project.path())
+        .unwrap();
+
+    assert_eq!(
+        system_prompt_with(instructions).await,
+        format!(
+            "You are a coding agent.\n\n\
+             Instructions follow, from general to specific. \
+             Where they conflict, the later one applies.\n\n\
+             Instructions from {}:\n\nAnswer briefly.\n\n\
+             Instructions from {}:\n\nAlways use tabs.",
+            user_file.display(),
+            project_file.display()
+        )
+    );
+}
+
+#[tokio::test]
+async fn claude_md_is_read_when_there_is_no_agents_md() {
+    let project = TempDir::new().unwrap();
+    std::fs::write(project.path().join("CLAUDE.md"), "Use spaces.").unwrap();
+
+    let instructions = Instructions::new().layer_dir(project.path()).unwrap();
+
+    assert!(
+        system_prompt_with(instructions)
+            .await
+            .ends_with("Use spaces.")
+    );
+}
+
+#[tokio::test]
+async fn claude_md_is_ignored_when_there_is_an_agents_md() {
+    let project = TempDir::new().unwrap();
+    std::fs::write(project.path().join("AGENTS.md"), "Use tabs.").unwrap();
+    std::fs::write(project.path().join("CLAUDE.md"), "Use spaces.").unwrap();
+
+    let instructions = Instructions::new().layer_dir(project.path()).unwrap();
+
+    let system_prompt = system_prompt_with(instructions).await;
+    assert!(system_prompt.ends_with("Use tabs."));
+    assert!(!system_prompt.contains("Use spaces."));
 }
 
 #[tokio::test]
@@ -207,7 +293,7 @@ async fn session_runs_each_prompt_and_shows_its_events() {
             done(),
         ]
     );
-    assert_eq!(requests.lock().unwrap()[1].len(), 3);
+    assert_eq!(requests.lock().unwrap()[1].messages.len(), 3);
 }
 
 #[tokio::test]
@@ -323,7 +409,13 @@ struct ScriptedInference {
     requests: Requests,
 }
 
-type Requests = Arc<Mutex<Vec<Vec<Message>>>>;
+type Requests = Arc<Mutex<Vec<Seen>>>;
+
+/// What the model was sent in one call.
+struct Seen {
+    system: String,
+    messages: Vec<Message>,
+}
 
 impl ScriptedInference {
     fn new(replies: impl IntoIterator<Item = Reply>) -> (Self, Requests) {
@@ -338,10 +430,10 @@ impl ScriptedInference {
 
 impl Inference for ScriptedInference {
     fn infer(&self, request: Request<'_>) -> impl Stream<Item = Result<Chunk, Error>> {
-        self.requests
-            .lock()
-            .unwrap()
-            .push(request.messages.to_vec());
+        self.requests.lock().unwrap().push(Seen {
+            system: request.system.to_owned(),
+            messages: request.messages.to_vec(),
+        });
         let reply = self.replies.lock().unwrap().pop_front();
 
         let chunks: Vec<_> = match reply {
@@ -398,4 +490,18 @@ fn done() -> Event {
         stop: StopReason::EndTurn,
         usage: Usage::default(),
     }
+}
+
+/// The system prompt the model receives from an agent with `instructions`.
+async fn system_prompt_with(instructions: Instructions) -> String {
+    let (inference, requests) = ScriptedInference::new([text_reply("Hi.")]);
+    let mut agent = haarniska::builder()
+        .with_inference(inference)
+        .with_system_prompt("You are a coding agent.")
+        .with_instructions(instructions)
+        .build();
+
+    let _: Vec<Event> = agent.prompt("Hello").collect().await;
+
+    requests.lock().unwrap()[0].system.clone()
 }

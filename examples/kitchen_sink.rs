@@ -3,6 +3,7 @@
 use std::time::Instant;
 
 use haarniska::Agent;
+use haarniska::harness::instructions::Instructions;
 use haarniska::inference::anthropic::{AnthropicInference, model};
 use haarniska::tui::Tui;
 
@@ -14,6 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent = haarniska::builder()
         .with_inference(AnthropicInference::new(model::CLAUDE_HAIKU_4_5)?)
         .with_default_tools()
+        .with_instructions(Instructions::new().layer_dir(".")?)
         .build();
 
     agent.run(Tui::new(started)?).await;
