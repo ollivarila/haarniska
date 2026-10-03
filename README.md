@@ -2,6 +2,8 @@
 
 No bullshit library-first, extensible coding agent harness. Under development.
 
+![The terminal UI showing a reply with highlighted code](docs/assets/screenshot.png)
+
 See `examples` for demo.
 
 Documentation in `docs` is mostly for agents but should be in readable state.
