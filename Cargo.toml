@@ -8,6 +8,7 @@ keywords = ["agent", "llm", "harness", "ai"]
 categories = ["development-tools"]
 
 [dependencies]
+async-stream = "0.3.6"
 async-trait = "0.1.92"
 futures-util = "0.3.34"
 genai = "0.6.5"

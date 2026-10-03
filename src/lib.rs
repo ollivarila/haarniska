@@ -6,11 +6,15 @@ pub mod tools;
 pub mod tui;
 pub mod ui;
 
+use std::path::PathBuf;
+
 use futures_util::Stream;
 use harness::tool::{DynTool, Tool};
 use harness::{Event, Harness};
 use inference::Inference;
 use ui::Ui;
+
+const DEFAULT_SYSTEM_PROMPT: &str = "You are a helpful assistant for coding tasks";
 
 pub trait Agent {
     /// One turn of the agentic loop.
@@ -24,12 +28,16 @@ pub fn builder() -> AgentBuilder {
     AgentBuilder {
         inference: (),
         tools: Vec::new(),
+        system_prompt: DEFAULT_SYSTEM_PROMPT.into(),
+        cwd: ".".into(),
     }
 }
 
 pub struct AgentBuilder<I = ()> {
     inference: I,
     tools: Vec<Box<dyn DynTool>>,
+    system_prompt: String,
+    cwd: PathBuf,
 }
 
 impl AgentBuilder {
@@ -37,6 +45,8 @@ impl AgentBuilder {
         AgentBuilder {
             inference,
             tools: self.tools,
+            system_prompt: self.system_prompt,
+            cwd: self.cwd,
         }
     }
 }
@@ -54,13 +64,23 @@ impl<I> AgentBuilder<I> {
             .with_tool(tools::Edit)
             .with_tool(tools::Shell)
     }
+
+    /// Replaces the default system prompt.
+    pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
+        self.system_prompt = system_prompt.into();
+        self
+    }
+
+    /// Where tools resolve relative paths. Defaults to the process's
+    /// working directory.
+    pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd = cwd.into();
+        self
+    }
 }
 
 impl<I: Inference> AgentBuilder<I> {
     pub fn build(self) -> impl Agent {
-        Harness {
-            inference: self.inference,
-            tools: self.tools,
-        }
+        Harness::new(self.inference, self.tools, self.system_prompt, self.cwd)
     }
 }

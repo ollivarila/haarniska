@@ -90,7 +90,7 @@ pub struct Usage {
     pub output_tokens: u64,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[error("{message}")]
 pub struct Error {
     message: String,
