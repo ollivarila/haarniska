@@ -7,7 +7,11 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use ratatui::crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    MouseEvent, MouseEventKind,
+};
+use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::Line;
@@ -24,6 +28,8 @@ const RENDER_THREAD: &str = "haarniska-tui";
 const TICK: Duration = Duration::from_millis(50);
 /// Lines of a tool result shown in the transcript.
 const RESULT_LINES: usize = 8;
+/// Lines the transcript moves per notch of the mouse wheel.
+const WHEEL_LINES: usize = 3;
 
 /// A full-screen terminal UI. Keys are read and the screen is drawn on its
 /// own thread, so a tool that blocks cannot freeze it.
@@ -39,6 +45,8 @@ impl Tui {
     /// time from then to the first frame is shown as the startup time.
     pub fn new(started: Instant) -> io::Result<Self> {
         let terminal = ratatui::try_init()?;
+        // Needed to see the mouse wheel.
+        execute!(io::stdout(), EnableMouseCapture)?;
         let hook = install_panic_hook();
         let (events_tx, events_rx) = mpsc::channel();
         let (inputs_tx, inputs_rx) = unbounded_channel();
@@ -47,7 +55,7 @@ impl Tui {
             .name(RENDER_THREAD.into())
             .spawn(move || {
                 render(terminal, App::new(started), events_rx, inputs_tx);
-                ratatui::restore();
+                restore();
             })?;
 
         Ok(Self {
@@ -113,6 +121,7 @@ fn install_panic_hook() -> Arc<PanicHookState> {
     panic::set_hook(Box::new(move |info| {
         let on_render_thread = thread::current().name() == Some(RENDER_THREAD);
         if on_render_thread || !hook_state.active.load(Ordering::Relaxed) {
+            let _ = execute!(io::stdout(), DisableMouseCapture);
             restore_and_print(info);
         } else {
             *hook_state.last_panic.lock().unwrap() = Some(info.to_string());
@@ -120,6 +129,12 @@ fn install_panic_hook() -> Arc<PanicHookState> {
     }));
 
     state
+}
+
+/// Gives the terminal back as it was.
+fn restore() {
+    let _ = execute!(io::stdout(), DisableMouseCapture);
+    ratatui::restore();
 }
 
 /// The render thread: applies events, draws, and turns keys into input,
@@ -146,6 +161,10 @@ fn render(
         let key = match event::poll(TICK) {
             Ok(true) => match event::read() {
                 Ok(event::Event::Key(key)) if key.kind == KeyEventKind::Press => key,
+                Ok(event::Event::Mouse(mouse)) => {
+                    app.mouse(mouse);
+                    continue;
+                }
                 Ok(_) => continue,
                 Err(_) => return,
             },
@@ -170,6 +189,13 @@ struct App {
     output_tokens: u64,
     started: Instant,
     startup: Option<Duration>,
+    /// The transcript line at the top of the screen, or `None` to follow
+    /// the newest output.
+    top: Option<usize>,
+    /// From the last draw: lines on a screen, and the `top` that shows the
+    /// end of the transcript.
+    page: usize,
+    max_top: usize,
 }
 
 struct Entry {
@@ -196,6 +222,9 @@ impl App {
             output_tokens: 0,
             started,
             startup: None,
+            top: None,
+            page: 1,
+            max_top: 0,
         }
     }
 
@@ -246,7 +275,20 @@ impl App {
                 let prompt = std::mem::take(&mut self.input);
                 self.push(EntryKind::User, prompt.clone());
                 self.turn_running = true;
+                self.top = None;
                 Some(Input::Prompt(prompt))
+            }
+            KeyCode::PageUp => {
+                self.scroll_up(self.page);
+                None
+            }
+            KeyCode::PageDown => {
+                self.scroll_down(self.page);
+                None
+            }
+            KeyCode::End => {
+                self.top = None;
+                None
             }
             KeyCode::Char(c) if !ctrl => {
                 self.input.push(c);
@@ -260,6 +302,27 @@ impl App {
         }
     }
 
+    fn mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.scroll_up(WHEEL_LINES),
+            MouseEventKind::ScrollDown => self.scroll_down(WHEEL_LINES),
+            _ => {}
+        }
+    }
+
+    fn scroll_up(&mut self, lines: usize) {
+        let top = self.top.unwrap_or(self.max_top);
+        self.top = Some(top.saturating_sub(lines));
+    }
+
+    /// Reaching the end goes back to following.
+    fn scroll_down(&mut self, lines: usize) {
+        self.top = self
+            .top
+            .map(|top| top + lines)
+            .filter(|top| *top < self.max_top);
+    }
+
     fn draw(&mut self, frame: &mut Frame) {
         let startup = *self.startup.get_or_insert_with(|| self.started.elapsed());
         let [transcript_area, input_area, status_area] = Layout::vertical([
@@ -269,10 +332,15 @@ impl App {
         ])
         .areas(frame.area());
 
-        // The newest lines that fit, so the transcript follows the reply.
-        let mut lines = self.lines(transcript_area.width as usize);
-        let hidden = lines.len().saturating_sub(transcript_area.height as usize);
-        frame.render_widget(Paragraph::new(lines.split_off(hidden)), transcript_area);
+        // One screen of the transcript: from `top` when scrolled back,
+        // otherwise the newest lines, so it follows the reply.
+        let lines = self.lines(transcript_area.width as usize);
+        self.page = (transcript_area.height as usize).max(1);
+        self.max_top = lines.len().saturating_sub(self.page);
+        self.top = self.top.filter(|top| *top < self.max_top);
+        let top = self.top.unwrap_or(self.max_top);
+        let visible: Vec<_> = lines.into_iter().skip(top).take(self.page).collect();
+        frame.render_widget(Paragraph::new(visible), transcript_area);
 
         // The end of the input that fits, so the cursor stays visible.
         let width = input_area.width.saturating_sub(2) as usize;
@@ -287,8 +355,13 @@ impl App {
         } else {
             "ready"
         };
+        let keys = if self.top.is_some() {
+            "scrolled back, End to follow"
+        } else {
+            "Enter send, Esc cancel, PgUp/PgDn or wheel scroll, Ctrl-C quit"
+        };
         let status = format!(
-            " {state} | startup {} ms | tokens {} in, {} out | Enter send, Esc cancel, Ctrl-C quit",
+            " {state} | startup {} ms | tokens {} in, {} out | {keys}",
             startup.as_millis(),
             self.input_tokens,
             self.output_tokens,
@@ -333,4 +406,125 @@ fn first_lines(text: &str, count: usize) -> String {
         lines.push("...");
     }
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::*;
+
+    /// An app showing a reply of the lines "1" to `count`, on a screen with
+    /// room for five transcript lines.
+    fn app_with_reply(count: usize) -> (App, Terminal<TestBackend>) {
+        let mut app = App::new(Instant::now());
+        let reply: Vec<String> = (1..=count).map(|n| n.to_string()).collect();
+        app.apply(Event::Text(reply.join("\n")));
+        let mut terminal = Terminal::new(TestBackend::new(60, 9)).unwrap();
+        transcript(&mut app, &mut terminal);
+        (app, terminal)
+    }
+
+    /// Draws and returns the transcript lines on screen.
+    fn transcript(app: &mut App, terminal: &mut Terminal<TestBackend>) -> Vec<String> {
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..5)
+            .map(|y| {
+                let row: String = (0..60).map(|x| buffer[(x, y)].symbol()).collect();
+                row.trim_end().to_owned()
+            })
+            .collect()
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.key(KeyEvent::from(code));
+    }
+
+    #[test]
+    fn transcript_follows_the_newest_output() {
+        let (mut app, mut terminal) = app_with_reply(20);
+
+        app.apply(Event::Text("\n21".into()));
+
+        // The last line on screen is the blank one that ends an entry.
+        assert_eq!(
+            transcript(&mut app, &mut terminal),
+            ["18", "19", "20", "21", ""]
+        );
+    }
+
+    #[test]
+    fn page_up_shows_earlier_output_and_stays_there() {
+        let (mut app, mut terminal) = app_with_reply(20);
+
+        press(&mut app, KeyCode::PageUp);
+        app.apply(Event::Text("\n21".into()));
+
+        assert_eq!(
+            transcript(&mut app, &mut terminal),
+            ["12", "13", "14", "15", "16"]
+        );
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_a_few_lines() {
+        let (mut app, mut terminal) = app_with_reply(20);
+
+        app.mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(
+            transcript(&mut app, &mut terminal),
+            ["14", "15", "16", "17", "18"]
+        );
+    }
+
+    #[test]
+    fn page_up_stops_at_the_start() {
+        let (mut app, mut terminal) = app_with_reply(20);
+
+        for _ in 0..10 {
+            press(&mut app, KeyCode::PageUp);
+        }
+
+        assert_eq!(
+            transcript(&mut app, &mut terminal),
+            ["1", "2", "3", "4", "5"]
+        );
+    }
+
+    #[test]
+    fn paging_down_to_the_end_follows_again() {
+        let (mut app, mut terminal) = app_with_reply(20);
+        press(&mut app, KeyCode::PageUp);
+        transcript(&mut app, &mut terminal);
+
+        press(&mut app, KeyCode::PageDown);
+        app.apply(Event::Text("\n21".into()));
+
+        assert_eq!(
+            transcript(&mut app, &mut terminal),
+            ["18", "19", "20", "21", ""]
+        );
+    }
+
+    #[test]
+    fn end_follows_again() {
+        let (mut app, mut terminal) = app_with_reply(20);
+        press(&mut app, KeyCode::PageUp);
+        press(&mut app, KeyCode::PageUp);
+
+        press(&mut app, KeyCode::End);
+
+        assert_eq!(
+            transcript(&mut app, &mut terminal),
+            ["17", "18", "19", "20", ""]
+        );
+    }
 }

@@ -107,8 +107,11 @@ Example: a reply runs to 200 lines and the user wants the start of it.
 
 - **Following** — by default the transcript shows its newest lines and moves
   as the reply streams.
-- **Scrolling back** — Page Up and Page Down move by a screen. Scrolling up
-  stops following: new output no longer moves what is on screen.
+- **Scrolling back** — Page Up and Page Down move by a screen; the mouse
+  wheel moves by a few lines. Scrolling up stops following: new output no
+  longer moves what is on screen.
+- **Selecting text** — the UI takes the mouse to see the wheel, so the
+  terminal's own selection needs its bypass key, usually Shift.
 - **Back to following** — scrolling down to the end, or pressing End.
   Sending a prompt also returns to the end.
 - **Shown in the status line** — when not following, the status line says
@@ -137,5 +140,3 @@ Example: a reply runs to 200 lines and the user wants the start of it.
 4. Multi-line input and prompt history.
 5. Rendering markdown in replies.
 6. Must UIs be movable between threads?
-7. Scrolling with the mouse wheel. Capturing the mouse breaks the terminal's
-   own text selection.
