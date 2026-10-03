@@ -5,6 +5,7 @@ pub mod instructions;
 pub mod skills;
 pub mod tool;
 
+use std::any::Any;
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
@@ -83,10 +84,9 @@ impl<I: Inference> Agent for Harness<I> {
                     yield Event::Failed(Error::new("the model's reply ended early"));
                     return;
                 };
-                usage.input_tokens += reply.usage.input_tokens;
-                usage.output_tokens += reply.usage.output_tokens;
+                usage += reply.usage;
 
-                let calls: Vec<_> = reply.content.iter().filter_map(as_tool_call).cloned().collect();
+                let calls: Vec<_> = reply.content.iter().filter_map(Block::as_tool_call).cloned().collect();
                 if calls.is_empty() {
                     self.messages.push(Message::Assistant(reply.content));
                     yield Event::Done { stop: reply.stop, usage };
@@ -128,11 +128,9 @@ impl<I: Inference> Agent for Harness<I> {
                 // Scoped so the wait for input is dropped before `ui` is
                 // used again.
                 let step = {
-                    let input = pin!(ui.next());
-                    match select(events.next(), input).await {
-                        Either::Left((event, _)) => Either::Left(event),
-                        Either::Right((input, _)) => Either::Right(input),
-                    }
+                    let event = events.next().map(Either::Left);
+                    let input = pin!(ui.next().map(Either::Right));
+                    select(event, input).await.factor_first().0
                 };
                 match step {
                     Either::Left(Some(event)) => ui.show(event),
@@ -184,7 +182,7 @@ impl<I> Harness<I> {
         let mut reasons = Vec::new();
         for hook in &self.hooks {
             let decision = hook.before_tool(&self.tool_cx, &call.name, &mut call.input);
-            match AssertUnwindSafe(decision).catch_unwind().await {
+            match caught(decision).await {
                 Ok(Decision::Continue) => {}
                 Ok(Decision::Block(reason)) => return Err(CallError::Blocked(reason)),
                 // Later hooks still run: one of them may block.
@@ -203,7 +201,7 @@ impl<I> Harness<I> {
             input: call.input.clone(),
             reasons,
         });
-        match AssertUnwindSafe(answer).catch_unwind().await {
+        match caught(answer).await {
             Ok(Answer::Allow) => Ok(()),
             Ok(Answer::AllowAlways) => {
                 self.always_allowed.insert(call.name.clone());
@@ -216,16 +214,13 @@ impl<I> Harness<I> {
     /// Runs one tool call. A failure, also a crash, is returned as an error
     /// so the model can react and the turn goes on.
     async fn run_tool(&self, call: &ToolCall) -> Result<String, CallError> {
-        let index = self
-            .tool_specs
+        let tool = self
+            .tools
             .iter()
-            .position(|spec| spec.name == call.name)
+            .find(|tool| tool.name() == call.name)
             .ok_or_else(|| CallError::UnknownTool(call.name.clone()))?;
-        let run = self.tools[index].call(&self.tool_cx, call.input.clone());
-        match AssertUnwindSafe(run).catch_unwind().await {
-            Ok(outcome) => Ok(outcome?),
-            Err(_) => Err(CallError::ToolCrashed),
-        }
+        let run = tool.call(&self.tool_cx, call.input.clone());
+        Ok(caught(run).await.map_err(|_| CallError::ToolCrashed)??)
     }
 
     /// Lets every hook, in order, change `result`. A hook that crashes
@@ -234,7 +229,7 @@ impl<I> Harness<I> {
         for hook in &self.hooks {
             let before = result.clone();
             let changed = hook.after_tool(&self.tool_cx, call, result);
-            if AssertUnwindSafe(changed).catch_unwind().await.is_err() {
+            if caught(changed).await.is_err() {
                 *result = before;
             }
             // A result always belongs to its call.
@@ -263,24 +258,19 @@ enum CallError {
 }
 
 fn to_result(call: &ToolCall, outcome: Result<String, CallError>) -> ToolResult {
-    match outcome {
-        Ok(output) => ToolResult {
-            call_id: call.id.clone(),
-            output,
-            is_error: false,
-        },
+    let (output, is_error) = match outcome {
+        Ok(output) => (output, false),
         // Not every adapter passes `is_error` on, so the text says it too.
-        Err(error) => ToolResult {
-            call_id: call.id.clone(),
-            output: format!("Error: {error}"),
-            is_error: true,
-        },
+        Err(error) => (format!("Error: {error}"), true),
+    };
+    ToolResult {
+        call_id: call.id.clone(),
+        output,
+        is_error,
     }
 }
 
-fn as_tool_call(block: &Block) -> Option<&ToolCall> {
-    match block {
-        Block::ToolCall(call) => Some(call),
-        _ => None,
-    }
+/// Awaits `future`, turning a panic in it into an error.
+async fn caught<T>(future: impl Future<Output = T>) -> Result<T, Box<dyn Any + Send>> {
+    AssertUnwindSafe(future).catch_unwind().await
 }

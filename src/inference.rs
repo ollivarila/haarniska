@@ -2,6 +2,8 @@
 
 pub mod anthropic;
 
+use std::ops::AddAssign;
+
 use futures_util::Stream;
 use serde_json::Value;
 
@@ -43,6 +45,15 @@ pub enum Block {
     /// Owned by the adapter that produced it. The harness stores it and
     /// sends it back unchanged.
     Opaque(Value),
+}
+
+impl Block {
+    pub fn as_tool_call(&self) -> Option<&ToolCall> {
+        match self {
+            Block::ToolCall(call) => Some(call),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,6 +99,13 @@ pub enum StopReason {
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+}
+
+impl AddAssign for Usage {
+    fn add_assign(&mut self, other: Self) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]

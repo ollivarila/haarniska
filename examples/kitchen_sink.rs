@@ -12,6 +12,8 @@ use haarniska::tui::Tui;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let started = Instant::now();
+    // First, so the prompt is on screen while the rest starts up.
+    let tui = Tui::new(started)?;
     // Loads ANTHROPIC_API_KEY from a `.env` file, if there is one.
     dotenvy::dotenv().ok();
     // User-wide skills first, then the project's, which win on a name clash.
@@ -20,7 +22,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer_dir(home.join(".claude/skills"))?
         .layer_dir(".claude/skills")?;
 
-    let tui = Tui::new(started)?;
     let agent = haarniska::builder()
         .with_inference(AnthropicInference::new(model::CLAUDE_HAIKU_4_5)?)
         .with_default_tools()

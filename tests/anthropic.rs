@@ -77,22 +77,27 @@ async fn server_replying(sse: &str) -> MockServer {
     server
 }
 
+fn inference_for(server: &MockServer) -> AnthropicInference {
+    AnthropicInference::with_endpoint(model::CLAUDE_OPUS_5, "test-key", &server.uri()).unwrap()
+}
+
+/// Every chunk of one model call with `messages`.
+async fn infer(inference: &AnthropicInference, messages: &[Message]) -> Vec<Chunk> {
+    let request = Request {
+        system: "",
+        messages,
+        tools: &[],
+    };
+    inference.infer(request).try_collect().await.unwrap()
+}
+
 #[tokio::test]
 async fn text_reply_streams_deltas_then_the_whole_reply() {
     let server = server_replying(TEXT_REPLY).await;
-    let inference =
-        AnthropicInference::with_endpoint(model::CLAUDE_OPUS_5, "test-key", &server.uri()).unwrap();
+    let inference = inference_for(&server);
     let messages = [Message::User("Say hello".into())];
 
-    let chunks: Vec<Chunk> = inference
-        .infer(Request {
-            system: "",
-            messages: &messages,
-            tools: &[],
-        })
-        .try_collect()
-        .await
-        .unwrap();
+    let chunks = infer(&inference, &messages).await;
 
     assert_eq!(
         chunks,
@@ -114,23 +119,14 @@ async fn text_reply_streams_deltas_then_the_whole_reply() {
 #[tokio::test]
 async fn last_message_is_a_cache_point() {
     let server = server_replying(TEXT_REPLY).await;
-    let inference =
-        AnthropicInference::with_endpoint(model::CLAUDE_OPUS_5, "test-key", &server.uri()).unwrap();
+    let inference = inference_for(&server);
     let messages = [
         Message::User("Say hello".into()),
         Message::Assistant(vec![Block::Text("Hello".into())]),
         Message::User("Again".into()),
     ];
 
-    let _: Vec<Chunk> = inference
-        .infer(Request {
-            system: "",
-            messages: &messages,
-            tools: &[],
-        })
-        .try_collect()
-        .await
-        .unwrap();
+    infer(&inference, &messages).await;
 
     let requests = server.received_requests().await.unwrap();
     let body: serde_json::Value = requests[0].body_json().unwrap();
@@ -150,19 +146,10 @@ async fn last_message_is_a_cache_point() {
 #[tokio::test]
 async fn thinking_is_sent_back_unchanged_with_the_tool_results() {
     let server = server_replying(THINKING_TOOL_REPLY).await;
-    let inference =
-        AnthropicInference::with_endpoint(model::CLAUDE_OPUS_5, "test-key", &server.uri()).unwrap();
+    let inference = inference_for(&server);
     let mut messages = vec![Message::User("Fix a.rs".into())];
 
-    let chunks: Vec<Chunk> = inference
-        .infer(Request {
-            system: "",
-            messages: &messages,
-            tools: &[],
-        })
-        .try_collect()
-        .await
-        .unwrap();
+    let chunks = infer(&inference, &messages).await;
     let Some(Chunk::Done(reply)) = chunks.last() else {
         panic!("the stream ends with the reply");
     };
@@ -173,15 +160,7 @@ async fn thinking_is_sent_back_unchanged_with_the_tool_results() {
         output: "fn main() {}".into(),
         is_error: false,
     }]));
-    let _: Vec<Chunk> = inference
-        .infer(Request {
-            system: "",
-            messages: &messages,
-            tools: &[],
-        })
-        .try_collect()
-        .await
-        .unwrap();
+    infer(&inference, &messages).await;
 
     let requests = server.received_requests().await.unwrap();
     let body: serde_json::Value = requests[1].body_json().unwrap();

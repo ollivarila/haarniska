@@ -168,9 +168,7 @@ fn to_reply(end: StreamEnd) -> Reply {
         .filter_map(to_block)
         .collect();
 
-    let has_tool_call = content
-        .iter()
-        .any(|block| matches!(block, Block::ToolCall(_)));
+    let has_tool_call = content.iter().any(|block| block.as_tool_call().is_some());
     let stop = match end.captured_stop_reason {
         Some(genai::chat::StopReason::ToolCall(_)) => StopReason::ToolUse,
         Some(genai::chat::StopReason::MaxTokens(_)) => StopReason::MaxTokens,

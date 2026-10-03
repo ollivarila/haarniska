@@ -91,6 +91,8 @@ impl ToolError {
 /// sit in one list.
 #[async_trait]
 pub(crate) trait DynTool: Send + Sync {
+    fn name(&self) -> &'static str;
+
     fn spec(&self) -> ToolSpec;
 
     async fn call(&self, cx: &ToolCx, input: Value) -> Result<String, ToolError>;
@@ -98,6 +100,10 @@ pub(crate) trait DynTool: Send + Sync {
 
 #[async_trait]
 impl<T: Tool> DynTool for T {
+    fn name(&self) -> &'static str {
+        T::NAME
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: T::NAME.into(),

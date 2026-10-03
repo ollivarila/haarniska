@@ -28,26 +28,13 @@ async fn text_reply_is_streamed_and_ends_the_turn() {
 
     let events: Vec<Event> = agent.prompt("Say hello").collect().await;
 
-    assert_eq!(
-        events,
-        [
-            Event::Text("Hello".into()),
-            Event::Done {
-                stop: StopReason::EndTurn,
-                usage: Usage::default(),
-            },
-        ]
-    );
+    assert_eq!(events, [Event::Text("Hello".into()), done(),]);
 }
 
 #[tokio::test]
 async fn tool_call_runs_and_its_result_goes_back_to_the_model() {
     let sandbox = TempDir::new().unwrap();
-    let call = ToolCall {
-        id: "call_1".into(),
-        name: "write".into(),
-        input: json!({"path": "a.txt", "content": "hi"}),
-    };
+    let call = write_a_txt();
     let (inference, requests) =
         ScriptedInference::new([tool_reply(call.clone()), text_reply("Written.")]);
     let mut agent = haarniska::builder()
@@ -69,10 +56,7 @@ async fn tool_call_runs_and_its_result_goes_back_to_the_model() {
             Event::ToolStarted(call.clone()),
             Event::ToolFinished(result.clone()),
             Event::Text("Written.".into()),
-            Event::Done {
-                stop: StopReason::EndTurn,
-                usage: Usage::default(),
-            },
+            done(),
         ]
     );
     let written = std::fs::read_to_string(sandbox.path().join("a.txt")).unwrap();
@@ -196,7 +180,7 @@ async fn next_prompt_continues_the_conversation() {
 #[tokio::test]
 async fn hook_blocks_a_call_and_the_model_is_told_why() {
     let sandbox = TempDir::new().unwrap();
-    let call = tool_call("write", json!({"path": "a.txt", "content": "hi"}));
+    let call = write_a_txt();
     let (inference, _requests) =
         ScriptedInference::new([tool_reply(call.clone()), text_reply("Understood.")]);
     let mut agent = haarniska::builder()
@@ -222,13 +206,8 @@ async fn hook_blocks_a_call_and_the_model_is_told_why() {
 #[tokio::test]
 async fn hook_changes_the_input_a_tool_runs_with() {
     let sandbox = TempDir::new().unwrap();
-    let (inference, _requests) = ScriptedInference::new([
-        tool_reply(tool_call(
-            "write",
-            json!({"path": "a.txt", "content": "hi"}),
-        )),
-        text_reply("Written."),
-    ]);
+    let (inference, _requests) =
+        ScriptedInference::new([tool_reply(write_a_txt()), text_reply("Written.")]);
     let mut agent = haarniska::builder()
         .with_inference(inference)
         .with_default_tools()
@@ -275,13 +254,8 @@ async fn hooks_change_the_result_in_the_order_they_were_added() {
 #[tokio::test]
 async fn hook_crashing_before_a_call_blocks_it() {
     let sandbox = TempDir::new().unwrap();
-    let (inference, _requests) = ScriptedInference::new([
-        tool_reply(tool_call(
-            "write",
-            json!({"path": "a.txt", "content": "hi"}),
-        )),
-        text_reply("Sorry."),
-    ]);
+    let (inference, _requests) =
+        ScriptedInference::new([tool_reply(write_a_txt()), text_reply("Sorry.")]);
     let mut agent = haarniska::builder()
         .with_inference(inference)
         .with_default_tools()
@@ -323,13 +297,8 @@ async fn hook_crashing_after_a_call_leaves_the_result_alone() {
 async fn call_that_needs_consent_runs_when_the_user_allows_it() {
     let sandbox = TempDir::new().unwrap();
     let (approver, asked) = ScriptedApprover::new([Answer::Allow]);
-    let (inference, _requests) = ScriptedInference::new([
-        tool_reply(tool_call(
-            "write",
-            json!({"path": "a.txt", "content": "hi"}),
-        )),
-        text_reply("Written."),
-    ]);
+    let (inference, _requests) =
+        ScriptedInference::new([tool_reply(write_a_txt()), text_reply("Written.")]);
     let mut agent = haarniska::builder()
         .with_inference(inference)
         .with_default_tools()
@@ -355,13 +324,8 @@ async fn call_that_needs_consent_runs_when_the_user_allows_it() {
 async fn call_the_user_denies_does_not_run_and_the_model_is_told() {
     let sandbox = TempDir::new().unwrap();
     let (approver, _asked) = ScriptedApprover::new([Answer::Deny]);
-    let (inference, _requests) = ScriptedInference::new([
-        tool_reply(tool_call(
-            "write",
-            json!({"path": "a.txt", "content": "hi"}),
-        )),
-        text_reply("Understood."),
-    ]);
+    let (inference, _requests) =
+        ScriptedInference::new([tool_reply(write_a_txt()), text_reply("Understood.")]);
     let mut agent = haarniska::builder()
         .with_inference(inference)
         .with_default_tools()
@@ -382,13 +346,8 @@ async fn call_the_user_denies_does_not_run_and_the_model_is_told() {
 #[tokio::test]
 async fn call_that_needs_consent_is_blocked_when_there_is_no_one_to_ask() {
     let sandbox = TempDir::new().unwrap();
-    let (inference, _requests) = ScriptedInference::new([
-        tool_reply(tool_call(
-            "write",
-            json!({"path": "a.txt", "content": "hi"}),
-        )),
-        text_reply("Understood."),
-    ]);
+    let (inference, _requests) =
+        ScriptedInference::new([tool_reply(write_a_txt()), text_reply("Understood.")]);
     let mut agent = haarniska::builder()
         .with_inference(inference)
         .with_default_tools()
@@ -458,13 +417,8 @@ async fn tools_that_were_not_named_run_without_asking() {
 #[tokio::test]
 async fn block_from_a_later_hook_wins_and_the_user_is_not_asked() {
     let (approver, asked) = ScriptedApprover::new([Answer::Allow]);
-    let (inference, _requests) = ScriptedInference::new([
-        tool_reply(tool_call(
-            "write",
-            json!({"path": "a.txt", "content": "hi"}),
-        )),
-        text_reply("Understood."),
-    ]);
+    let (inference, _requests) =
+        ScriptedInference::new([tool_reply(write_a_txt()), text_reply("Understood.")]);
     let mut agent = haarniska::builder()
         .with_inference(inference)
         .with_default_tools()
@@ -1014,6 +968,11 @@ fn tool_call(name: &str, input: Value) -> ToolCall {
         name: name.into(),
         input,
     }
+}
+
+/// A call that writes "hi" to `a.txt`.
+fn write_a_txt() -> ToolCall {
+    tool_call("write", json!({"path": "a.txt", "content": "hi"}))
 }
 
 /// The result of the only tool call in `events`.

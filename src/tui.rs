@@ -12,7 +12,7 @@ use ratatui::crossterm::event::{
     MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Padding, Paragraph};
@@ -22,11 +22,12 @@ use tokio::sync::oneshot;
 
 use crate::harness::Event;
 use crate::harness::hook::{Answer, ApprovalRequest, Approver};
-use crate::inference::StopReason;
+use crate::inference::{StopReason, Usage};
 use crate::ui::{Input, Ui};
 
 const RENDER_THREAD: &str = "haarniska-tui";
-/// How long the render thread waits for a key before redrawing.
+/// How long the render thread waits for a key before looking for news
+/// from the harness.
 const TICK: Duration = Duration::from_millis(50);
 /// Lines of a tool result shown in the transcript.
 const RESULT_LINES: usize = 8;
@@ -196,6 +197,8 @@ fn render(
     messages: mpsc::Receiver<Message>,
     inputs: UnboundedSender<Input>,
 ) {
+    // Whether the screen is out of date.
+    let mut dirty = true;
     loop {
         loop {
             match messages.try_recv() {
@@ -205,31 +208,40 @@ fn render(
                 Ok(Message::Stop) | Err(mpsc::TryRecvError::Disconnected) => return,
                 Err(mpsc::TryRecvError::Empty) => break,
             }
+            dirty = true;
         }
         // A question nobody waits for any more, as after a cancelled turn.
-        app.question.take_if(|question| question.answer.is_closed());
+        let abandoned = app.question.take_if(|question| question.answer.is_closed());
+        dirty |= abandoned.is_some();
 
-        if terminal.draw(|frame| app.draw(frame)).is_err() {
+        if dirty && terminal.draw(|frame| app.draw(frame)).is_err() {
             return;
         }
+        dirty = false;
 
-        let key = match event::poll(TICK) {
-            Ok(true) => match event::read() {
-                Ok(event::Event::Key(key)) if key.kind == KeyEventKind::Press => key,
-                Ok(event::Event::Mouse(mouse)) => {
-                    app.mouse(mouse);
-                    continue;
-                }
-                Ok(_) => continue,
+        // Everything waiting is handled before the next draw, so a paste or
+        // a moving mouse costs one frame, not one per event.
+        let mut wait = TICK;
+        loop {
+            match event::poll(wait) {
+                Ok(true) => wait = Duration::ZERO,
+                Ok(false) => break,
                 Err(_) => return,
-            },
-            Ok(false) => continue,
-            Err(_) => return,
-        };
-        if let Some(input) = app.key(key) {
-            let quit = input == Input::Quit;
-            if inputs.send(input).is_err() || quit {
-                return;
+            }
+            match event::read() {
+                Ok(event::Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                    dirty = true;
+                    if let Some(input) = app.key(key) {
+                        let quit = input == Input::Quit;
+                        if inputs.send(input).is_err() || quit {
+                            return;
+                        }
+                    }
+                }
+                Ok(event::Event::Mouse(mouse)) => dirty |= app.mouse(mouse),
+                Ok(event::Event::Resize(..)) => dirty = true,
+                Ok(_) => {}
+                Err(_) => return,
             }
         }
     }
@@ -240,8 +252,7 @@ struct App {
     transcript: Vec<Entry>,
     input: String,
     turn_running: bool,
-    input_tokens: u64,
-    output_tokens: u64,
+    usage: Usage,
     started: Instant,
     /// Time to the first frame, and to the agent being ready for input.
     first_paint: Option<Duration>,
@@ -277,8 +288,7 @@ impl App {
             transcript: Vec::new(),
             input: String::new(),
             turn_running: false,
-            input_tokens: 0,
-            output_tokens: 0,
+            usage: Usage::default(),
             started,
             first_paint: None,
             ready: None,
@@ -308,8 +318,7 @@ impl App {
             }
             Event::Done { stop, usage } => {
                 self.turn_running = false;
-                self.input_tokens += usage.input_tokens;
-                self.output_tokens += usage.output_tokens;
+                self.usage += usage;
                 match stop {
                     StopReason::MaxTokens => self.push(EntryKind::Note, "(reply cut off)".into()),
                     StopReason::Refusal => self.push(EntryKind::Note, "(refused)".into()),
@@ -333,12 +342,15 @@ impl App {
                 self.push(EntryKind::Note, "(cancelled)".into());
                 Some(Input::Cancel)
             }
-            KeyCode::Char('y') if self.question.is_some() => self.answer(Answer::Allow),
-            KeyCode::Char('n') if self.question.is_some() => self.answer(Answer::Deny),
-            KeyCode::Char('a') if self.question.is_some() => self.answer(Answer::AllowAlways),
             // Nothing is typed while a question is open.
             // Nor is Enter an answer: it is too easy to press out of habit.
             KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Enter if self.question.is_some() => {
+                match key.code {
+                    KeyCode::Char('y') => self.answer(Answer::Allow),
+                    KeyCode::Char('n') => self.answer(Answer::Deny),
+                    KeyCode::Char('a') => self.answer(Answer::AllowAlways),
+                    _ => {}
+                }
                 None
             }
             KeyCode::Enter if !self.turn_running && !self.input.trim().is_empty() => {
@@ -372,19 +384,20 @@ impl App {
         }
     }
 
-    fn answer(&mut self, answer: Answer) -> Option<Input> {
+    fn answer(&mut self, answer: Answer) {
         if let Some(question) = self.question.take() {
             let _ = question.answer.send(answer);
         }
-        None
     }
 
-    fn mouse(&mut self, mouse: MouseEvent) {
+    /// Whether the mouse changed what is on screen.
+    fn mouse(&mut self, mouse: MouseEvent) -> bool {
         match mouse.kind {
             MouseEventKind::ScrollUp => self.scroll_up(WHEEL_LINES),
             MouseEventKind::ScrollDown => self.scroll_down(WHEEL_LINES),
-            _ => {}
+            _ => return false,
         }
+        true
     }
 
     fn scroll_up(&mut self, lines: usize) {
@@ -404,8 +417,10 @@ impl App {
         let first_paint = *self
             .first_paint
             .get_or_insert_with(|| self.started.elapsed());
-        let question = self.question.as_ref().map(|question| &question.request);
-        let question_lines = question.map(|request| question_lines(request, frame.area().width));
+        let question_lines = self
+            .question
+            .as_ref()
+            .map(|question| question_lines(&question.request, frame.area().width));
         let input_height = question_lines.as_ref().map_or(1, Vec::len) as u16 + 2;
         let [transcript_area, input_area, status_area] = Layout::vertical([
             Constraint::Min(1),
@@ -414,51 +429,47 @@ impl App {
         ])
         .areas(frame.area());
 
-        // One screen of the transcript: from `top` when scrolled back,
-        // otherwise the newest lines, so it follows the reply.
+        self.draw_transcript(frame, transcript_area);
+        match (&self.question, question_lines) {
+            (Some(question), Some(lines)) => {
+                draw_question(frame, input_area, &question.request.tool, lines);
+            }
+            _ => self.draw_input(frame, input_area),
+        }
+        frame.render_widget(Paragraph::new(self.status_line(first_paint)), status_area);
+    }
+
+    /// One screen of the transcript: from `top` when scrolled back,
+    /// otherwise the newest lines, so it follows the reply.
+    fn draw_transcript(&mut self, frame: &mut Frame, area: Rect) {
         let padding = Padding::left(1);
-        let lines = self.lines(transcript_area.width.saturating_sub(padding.left) as usize);
-        self.page = (transcript_area.height as usize).max(1);
+        let lines = self.lines(area.width.saturating_sub(padding.left) as usize);
+        self.page = (area.height as usize).max(1);
         self.max_top = lines.len().saturating_sub(self.page);
         self.top = self.top.filter(|top| *top < self.max_top);
         let top = self.top.unwrap_or(self.max_top);
         let visible: Vec<_> = lines.into_iter().skip(top).take(self.page).collect();
         let block = Block::new().padding(padding);
-        frame.render_widget(Paragraph::new(visible).block(block), transcript_area);
+        frame.render_widget(Paragraph::new(visible).block(block), area);
+    }
 
-        if let (Some(request), Some(lines)) = (question, question_lines) {
-            let tool = request.tool.as_str();
-            let keys = Line::from(vec![
-                " ".into(),
-                "y".green().bold(),
-                " allow, ".into(),
-                "n".red().bold(),
-                " deny, ".into(),
-                "a".cyan().bold(),
-                format!(" always allow {tool} ").into(),
-            ]);
-            let block = Block::new()
-                .borders(Borders::TOP | Borders::BOTTOM)
-                .border_style(Style::new().fg(Color::Yellow))
-                .title(format!(" Allow {tool}? ").yellow().bold())
-                .title_bottom(keys);
-            frame.render_widget(Paragraph::new(lines).block(block), input_area);
-        } else {
-            // The end of the input that fits, so the cursor stays visible.
-            // One column is kept free for the cursor.
-            let marker_width = INPUT_MARKER.chars().count() as u16;
-            let width = input_area.width.saturating_sub(marker_width + 1) as usize;
-            let hidden = self.input.chars().count().saturating_sub(width);
-            let visible: String = self.input.chars().skip(hidden).collect();
-            let cursor_x = input_area.x + marker_width + visible.chars().count() as u16;
-            let line = Line::from(vec![INPUT_MARKER.cyan().bold(), visible.into()]);
-            let block = Block::new()
-                .borders(Borders::TOP | Borders::BOTTOM)
-                .border_style(Style::new().fg(Color::DarkGray));
-            frame.render_widget(Paragraph::new(line).block(block), input_area);
-            frame.set_cursor_position((cursor_x, input_area.y + 1));
-        }
+    fn draw_input(&self, frame: &mut Frame, area: Rect) {
+        // The end of the input that fits, so the cursor stays visible.
+        // One column is kept free for the cursor.
+        let marker_width = INPUT_MARKER.chars().count() as u16;
+        let width = area.width.saturating_sub(marker_width + 1) as usize;
+        let hidden = self.input.chars().count().saturating_sub(width);
+        let visible: String = self.input.chars().skip(hidden).collect();
+        let cursor_x = area.x + marker_width + visible.chars().count() as u16;
+        let line = Line::from(vec![INPUT_MARKER.cyan().bold(), visible.into()]);
+        let block = Block::new()
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .border_style(Style::new().fg(Color::DarkGray));
+        frame.render_widget(Paragraph::new(line).block(block), area);
+        frame.set_cursor_position((cursor_x, area.y + 1));
+    }
 
+    fn status_line(&self, first_paint: Duration) -> Line<'static> {
         let state = if self.question.is_some() {
             "waiting for you".magenta().bold()
         } else if self.turn_running {
@@ -472,7 +483,7 @@ impl App {
             "Enter send, Esc cancel, PgUp/PgDn or wheel scroll, Ctrl-C quit".dim()
         };
         let separator = || " | ".dim();
-        let status = Line::from(vec![
+        Line::from(vec![
             " ".into(),
             state,
             separator(),
@@ -485,14 +496,13 @@ impl App {
             },
             separator(),
             "tokens ".dim(),
-            self.input_tokens.to_string().cyan(),
+            self.usage.input_tokens.to_string().cyan(),
             " in, ".dim(),
-            self.output_tokens.to_string().cyan(),
+            self.usage.output_tokens.to_string().cyan(),
             " out".dim(),
             separator(),
             keys,
-        ]);
-        frame.render_widget(Paragraph::new(status), status_area);
+        ])
     }
 
     /// The transcript as screen lines, wrapped to `width`.
@@ -500,7 +510,7 @@ impl App {
         let mut lines = Vec::new();
         for entry in &self.transcript {
             let (prefix, style) = match entry.kind {
-                EntryKind::User => ("> ", Style::new().fg(Color::Cyan).bold()),
+                EntryKind::User => (INPUT_MARKER, Style::new().fg(Color::Cyan).bold()),
                 EntryKind::Reply => ("", Style::new()),
                 EntryKind::Tool => ("* ", Style::new().fg(Color::Yellow)),
                 EntryKind::Error => ("  ", Style::new().fg(Color::Red)),
@@ -519,17 +529,35 @@ impl App {
     }
 }
 
+/// A consent question about `tool`, in place of the input line.
+fn draw_question(frame: &mut Frame, area: Rect, tool: &str, lines: Vec<Line<'static>>) {
+    let keys = Line::from(vec![
+        " ".into(),
+        "y".green().bold(),
+        " allow, ".into(),
+        "n".red().bold(),
+        " deny, ".into(),
+        "a".cyan().bold(),
+        format!(" always allow {tool} ").into(),
+    ]);
+    let block = Block::new()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .border_style(Style::new().fg(Color::Yellow))
+        .title(format!(" Allow {tool}? ").yellow().bold())
+        .title_bottom(keys);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
 /// What a consent question shows between its lines: the call, then each reason.
 fn question_lines(request: &ApprovalRequest, screen_width: u16) -> Vec<Line<'static>> {
     let width = screen_width as usize;
     // A lone text field, like a shell command, reads better bare.
-    let input = match request.input.as_object().map(|fields| fields.values()) {
-        Some(mut values) if values.len() == 1 => match values.next() {
-            Some(serde_json::Value::String(text)) => text.clone(),
-            _ => request.input.to_string(),
-        },
-        _ => request.input.to_string(),
-    };
+    let lone_text = request
+        .input
+        .as_object()
+        .filter(|fields| fields.len() == 1)
+        .and_then(|fields| fields.values().next()?.as_str());
+    let input = lone_text.map_or_else(|| request.input.to_string(), str::to_owned);
 
     let mut lines: Vec<_> = wrap(&input, width)
         .into_iter()
@@ -595,12 +623,16 @@ mod tests {
     /// Draws and returns the transcript lines on screen.
     fn transcript(app: &mut App, terminal: &mut Terminal<TestBackend>) -> Vec<String> {
         terminal.draw(|frame| app.draw(frame)).unwrap();
+        rows(terminal, 0..5)
+            .iter()
+            .map(|row| row.trim().to_owned())
+            .collect()
+    }
+
+    /// The screen rows `ys`, as text.
+    fn rows(terminal: &Terminal<TestBackend>, ys: std::ops::Range<u16>) -> Vec<String> {
         let buffer = terminal.backend().buffer();
-        (0..5)
-            .map(|y| {
-                let row: String = (0..60).map(|x| buffer[(x, y)].symbol()).collect();
-                row.trim().to_owned()
-            })
+        ys.map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect())
             .collect()
     }
 
@@ -629,10 +661,7 @@ mod tests {
 
         terminal.draw(|frame| app.draw(frame)).unwrap();
 
-        let buffer = terminal.backend().buffer();
-        let rows: Vec<String> = (4..8)
-            .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>())
-            .collect();
+        let rows = rows(&terminal, 4..8);
         assert!(rows[0].contains(" Allow shell? "));
         assert!(rows[1].contains("git push"));
         assert!(rows[2].contains("pushes to the remote"));
