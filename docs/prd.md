@@ -25,6 +25,8 @@ are comfortable writing Rust.
   results, scrolling back through the session.
 - Plugins - add tools, and hook into the agent loop to block, change, or
   observe what happens.
+- Consent - ask the user before chosen tool calls run, such as shell
+  commands.
 - Project instructions - read `AGENTS.md` from the project and follow it.
 - Skills - find the skills available to the project, tell the model what
   each is for, and load one when the task calls for it.
@@ -52,7 +54,8 @@ Not in v1:
 - Slash commands
 - Installing or reloading plugins at runtime
 - Plugins written in other languages, including pi extensions
-- A permission sandbox (run the process in a container instead)
+- A permission sandbox (run the process in a container instead). Asking for
+  consent is a check before a call, not a boundary around the agent
 - Context compaction
 - Session branching
 - An RPC / JSON mode for embedding
@@ -86,6 +89,9 @@ Not in v1:
 8. As a developer, I want to scroll back through the session, so that I can
    read a long reply or an earlier tool result.
 
+9. As a developer, I want to approve shell commands and file changes before
+   they happen, so that the agent cannot surprise me.
+
 ## 7. Acceptance criteria
 
 - One can run example agent setup and perform simple actions using API key only.
@@ -97,5 +103,8 @@ Not in v1:
 - A hook can stop a tool call before it runs, and the model is told why.
 - A hook can change a tool call's input or result.
 - A failing hook does not end the session.
+- A tool call that needs consent does not run until the user allows it. A
+  denied call does not run, and the model is told.
+- With no way to ask the user, a call that needs consent does not run.
 - Earlier output can be scrolled back to, also while a turn is running, and
   the view returns to following new output.

@@ -92,7 +92,8 @@ harness                            render thread
 
 - **Own thread** — reads keys and draws. The harness side only sends and
   receives on channels, so both operations are cheap and neither blocks.
-- **Layout** — a scrolling transcript, an input line, a status line.
+- **Layout** — a scrolling transcript, an input line, a status line. The
+  input line spans the window, between two horizontal rules.
 - **Transcript** — the user's prompts, the reply as it streams, each tool
   call with its result, failures.
 - **Status line** — startup time and token usage.
@@ -100,6 +101,28 @@ harness                            render thread
   and Ctrl-D quit.
 - **Terminal state** — the screen is restored on quit and when the UI itself
   crashes.
+
+### Consent
+
+Example: the agent wants to run `git push` and a hook asked for consent.
+
+```
+─ Allow shell? ──────────────────────────────────────
+git push
+pushes to the remote
+─ y allow, n deny, a always allow shell ─────────────
+```
+
+- **Where** — the question takes the place of the input line until it is
+  answered.
+- **Shows** — the tool, its input, and each reason a hook gave.
+- **Keys** — `y` allows, `n` denies, `a` always allows this tool for the
+  session. Esc cancels the whole turn, as always. Enter does nothing here:
+  it is too easy to press out of habit.
+- **The rest keeps working** — scrolling, and the transcript, which still
+  shows what came before.
+- **Provided to the harness** — the UI hands out an approver before the
+  agent is built. See the [hooks spec](2026-10-03-hooks-design.md).
 
 ### Scrolling
 
