@@ -138,7 +138,10 @@ impl BedrockInference {
         }
     }
 
-    async fn invoke(&self, body: &str) -> Result<InvokeModelWithResponseStreamOutput, SendError> {
+    async fn invoke(
+        &self,
+        body: &str,
+    ) -> Result<InvokeModelWithResponseStreamOutput, Box<SendError>> {
         self.client()
             .await
             .invoke_model_with_response_stream()
@@ -148,6 +151,7 @@ impl BedrockInference {
             .body(Blob::new(body))
             .send()
             .await
+            .map_err(Box::new)
     }
 
     async fn client(&self) -> Client {
