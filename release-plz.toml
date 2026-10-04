@@ -1,0 +1,13 @@
+[workspace]
+# Before 1.0 a `feat` would only bump the patch version.
+features_always_increment_minor = true
+# Publish only when a release PR is merged, never on a plain push to main.
+release_always = false
+
+[changelog]
+commit_parsers = [
+    { message = "^feat", group = "added" },
+    { message = "^fix", group = "fixed" },
+    { message = "^perf", group = "changed" },
+    { message = "^.*", skip = true },
+]

@@ -92,7 +92,3 @@ MIT
 ## Contributing
 
 Not expecting any external contributions right now. Please open issue before anything and let's discuss.
-
-## Backlog
-
-- Release automation & CI

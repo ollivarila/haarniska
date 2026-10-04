@@ -2,8 +2,10 @@
 name = "haarniska"
 version = "0.0.0"
 edition = "2024"
-description = "Library-first, extensible coding agent harness. Placeholder; under development."
+description = "Library-first, extensible coding agent harness."
 license = "MIT"
+repository = "https://github.com/ollivarila/haarniska"
+exclude = ["docs/", ".github/", ".claude/"]
 keywords = ["agent", "llm", "harness", "ai"]
 categories = ["development-tools"]
 
