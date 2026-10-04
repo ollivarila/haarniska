@@ -161,7 +161,27 @@ Caching in practice:
 - **Five minutes** — the provider's default lifetime. After a longer pause
   the next request pays full price once.
 
-## 6. Error handling
+## 6. Bedrock adapter
+
+Claude on Amazon Bedrock, behind the `bedrock-inference` cargo feature. See
+[ADR 0004](../adr/0004-bedrock-adapter-on-aws-sdk.md).
+
+- **Transport** — `InvokeModelWithResponseStream` on the AWS SDK, with the
+  Messages API as the body. Request and stream map the same as the Anthropic
+  adapter's.
+- **Configuration** — model or inference profile ID set when it is created.
+  AWS configuration is loaded on the first call: profile from `AWS_PROFILE`
+  (or set explicitly), region from `AWS_REGION`.
+- **Auth refresh** — an optional shell command. When a call fails before any
+  chunk because credentials are missing or expired, the command runs once,
+  the configuration is loaded again, and the call is retried. Its output is
+  captured, not shown.
+- **Prompt caching** — the same cache point as the Anthropic adapter.
+- **Opaque blocks** — thinking blocks are kept as the provider's raw block.
+  Opaque blocks from other adapters are not sent.
+- **Usage** — input tokens include cache reads and writes.
+
+## 7. Error handling
 
 - **Cannot start** — bad key, no network, rejected request. The call fails
   before any chunk; the turn ends with an error and the session continues.
@@ -179,7 +199,7 @@ Caching in practice:
 1. What does the error type look like, and does it say whether a retry is
    worthwhile?
 2. Does the Anthropic adapter live in this crate behind a build flag, or in
-   its own crate?
+   its own crate? The Bedrock adapter is behind a build flag.
 3. Who retries, and how often?
 4. User messages beyond text (images, files).
 5. Do opaque blocks need a provider tag, for switching providers mid-session?

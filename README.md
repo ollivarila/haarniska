@@ -21,6 +21,8 @@ Documentation in `docs` is mostly for agents but should be in readable state.
 - **Project instructions** — layered `AGENTS.md`, with `CLAUDE.md` fallback.
 - **Skills** — Agent Skills format, loaded on demand.
 - **Anthropic API inference provider** — use Anthropic models or build your own provider.
+- **Amazon Bedrock inference provider** — Claude through your AWS profile, with
+  an auth refresh command. Behind the `bedrock-inference` feature.
 - **Core Agent loop** — streams the reply, runs tool calls, repeats until done.
 - **Terminal UI** — minimalistic streaming UI, replies rendered as markdown
   with syntax highlighting.
@@ -43,14 +45,14 @@ session.
 ```mermaid
 flowchart LR
     user([User])
-    api[(Anthropic<br/>Messages API)]
+    api[(Anthropic Messages API<br/>or Amazon Bedrock)]
     files[("AGENTS.md<br/>skills")]
 
     subgraph agent [Agent]
         harness["Harness<br/>agent loop, session loop"]
         hooks["Hooks<br/>continue, block, ask"]
         tools["Tools<br/>read, write, edit, shell, skill, your own"]
-        inference["Inference<br/>AnthropicInference, on genai"]
+        inference["Inference<br/>AnthropicInference, on genai<br/>BedrockInference, on the AWS SDK"]
     end
 
     ui["Ui<br/>Tui, on its own render thread"]
@@ -81,6 +83,7 @@ stream. Without an approver, a call a hook wants consent for is blocked.
 | `harness::skills`       | Skill discovery and loading              |
 | `inference`             | The `Inference` trait and its data model |
 | `inference::anthropic`  | The Anthropic adapter                    |
+| `inference::bedrock`    | The Bedrock adapter                      |
 | `tools`                 | The built-in tools                       |
 | `ui`                    | The `Ui` trait                           |
 | `tui`                   | The terminal UI                          |
