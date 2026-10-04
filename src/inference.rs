@@ -1,6 +1,8 @@
 //! Inference: model APIs behind one interface.
 
 pub mod anthropic;
+#[cfg(feature = "bedrock-inference")]
+pub mod bedrock;
 
 use std::ops::AddAssign;
 
